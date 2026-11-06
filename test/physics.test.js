@@ -1,0 +1,364 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { readFileSync } from "node:fs";
+import { erf, erfc } from "../shared/erf.js";
+import {
+  alphaFromTolerance, bsplineWeights, bsplineModuli, isTransformableSize,
+  nextTransformableSize, PME_ORDER,
+} from "../shared/pme/parameters.js";
+import { gaussianTriple } from "../shared/random.js";
+import { parsePrmtop } from "../shared/amber/prmtop.js";
+import { parseInpcrd } from "../shared/amber/inpcrd.js";
+import { buildSystem } from "../shared/topology/system.js";
+import { potentialEnergy } from "../cpu/energy.js";
+import { applyPositionConstraints } from "../cpu/integrate/constraints.js";
+import { instantaneousTemperature } from "../cpu/integrate/langevin.js";
+
+const read = (name) => readFileSync(new URL(`fixtures/${name}`, import.meta.url), "utf8");
+
+test("erfc matches known values to near machine precision", () => {
+  // Reference values from SciPy.
+  // Printed by SciPy; see tools/ for the command that produced them.
+  const cases = [
+    [0.0, 1],
+    [0.5, 0.47950012218695348],
+    [1.0, 0.15729920705028516],
+    [2.0, 0.0046777349810472662],
+    [2.628261, 0.00020166438881469927],
+  ];
+  for (const [x, expected] of cases) {
+    const relative = Math.abs(erfc(x) - expected) / Math.max(expected, 1e-300);
+    assert.ok(relative < 1e-13, `erfc(${x}) off by ${relative}`);
+  }
+  assert.ok(Math.abs(erf(0.5) + erfc(0.5) - 1) < 1e-15);
+  assert.ok(Math.abs(erfc(-1) - (2 - erfc(1))) < 1e-15);
+});
+
+test("alpha reproduces OpenMM's rule", () => {
+  assert.ok(Math.abs(alphaFromTolerance(1.0, 0.0005) - 2.628261) < 1e-6);
+  assert.throws(() => alphaFromTolerance(0, 0.0005));
+  assert.throws(() => alphaFromTolerance(1, 0.6));
+});
+
+test("B-splines are a partition of unity with vanishing derivative sum", () => {
+  for (let index = 0; index <= 32; index += 1) {
+    const { weights, derivatives } = bsplineWeights(index / 32);
+    const weightSum = Array.from(weights).reduce((a, b) => a + b, 0);
+    const derivativeSum = Array.from(derivatives).reduce((a, b) => a + b, 0);
+    assert.ok(Math.abs(weightSum - 1) < 1e-14, `weights sum to ${weightSum}`);
+    assert.ok(Math.abs(derivativeSum) < 1e-14, `derivatives sum to ${derivativeSum}`);
+  }
+});
+
+test("the Nyquist B-spline modulus is patched, not zero", () => {
+  // Order 5 cancels exactly at m = K/2; an unpatched modulus there divided the
+  // convolution and produced 2.9e57 kJ/mol.
+  const moduli = bsplineModuli(24, PME_ORDER);
+  for (let m = 0; m < 24; m += 1) {
+    assert.ok(moduli[m] > 1e-6, `modulus ${m} is ${moduli[m]}`);
+  }
+  assert.ok(Math.abs(moduli[12] - 0.5 * (moduli[11] + moduli[13])) < 1e-9);
+});
+
+test("only 2/3/5-smooth grid sizes are accepted", () => {
+  assert.equal(isTransformableSize(24), true);
+  assert.equal(isTransformableSize(22), false, "22 = 2 x 11");
+  assert.equal(isTransformableSize(21), false, "21 = 3 x 7");
+  assert.equal(nextTransformableSize(22), 24);
+  assert.equal(nextTransformableSize(21), 24);
+});
+
+test("counter-based noise is standard normal and reproducible", () => {
+  const out = new Float64Array(3);
+  let sum = 0;
+  let sumSquares = 0;
+  let count = 0;
+  for (let atom = 0; atom < 4000; atom += 1) {
+    gaussianTriple(out, 99, atom, 3);
+    for (const value of out) { sum += value; sumSquares += value * value; count += 1; }
+  }
+  assert.ok(Math.abs(sum / count) < 0.05, `mean ${sum / count}`);
+  assert.ok(Math.abs(sumSquares / count - 1) < 0.05, `variance ${sumSquares / count}`);
+  gaussianTriple(out, 99, 7, 3);
+  const first = Array.from(out);
+  gaussianTriple(out, 99, 7, 3);
+  assert.deepEqual(Array.from(out), first);
+});
+
+test("vacuum energy matches the OpenMM reference per term", () => {
+  const topology = parsePrmtop(read("ala-vac.prmtop"));
+  const coordinates = parseInpcrd(read("ala-vac.inpcrd"),
+    { expectedAtomCount: topology.atomCount });
+  const system = buildSystem(topology, { constraints: "none", rigidWater: false, cutoff: 0 });
+  const { energy } = potentialEnergy(system, coordinates.positions, { method: "NoCutoff" });
+  const reference = JSON.parse(read("ala-vac-nocutoff.json"));
+  const close = (ours, theirs, tolerance, label) => {
+    const relative = Math.abs(ours - theirs) / Math.max(Math.abs(theirs), 1);
+    assert.ok(relative <= tolerance, `${label}: ours ${ours} theirs ${theirs} rel ${relative}`);
+  };
+  close(energy.lennardJones, reference.energy.ljOnly, 1e-9, "lennard-jones");
+  close(energy.coulomb, reference.energy.coulombOnly, 1e-7, "coulomb");
+  close(energy.total, reference.energy.total, 1e-7, "total");
+});
+
+test("PME energy and forces match the OpenMM reference", () => {
+  const topology = parsePrmtop(read("ala-wat.prmtop"));
+  const coordinates = parseInpcrd(read("ala-wat.inpcrd"),
+    { expectedAtomCount: topology.atomCount });
+  const system = buildSystem(topology, {
+    constraints: "HBonds", rigidWater: true, cutoff: 1.0, box: coordinates.box,
+  });
+  const { energy, forces } = potentialEnergy(system, coordinates.positions, {
+    method: "PME", alpha: 2.6282608939112583, grid: [24, 24, 24],
+  });
+  const reference = JSON.parse(read("ala-wat-pme.json"));
+  const relative = Math.abs(energy.total - reference.energy.total)
+    / Math.abs(reference.energy.total);
+  assert.ok(relative < 1e-7, `total energy relative error ${relative}`);
+
+  let worst = 0;
+  let sumSquares = 0;
+  for (let atom = 0; atom < topology.atomCount; atom += 1) {
+    for (let component = 0; component < 3; component += 1) {
+      const theirs = reference.forces.total[atom][component];
+      sumSquares += theirs * theirs;
+      worst = Math.max(worst, Math.abs(forces[atom * 3 + component] - theirs));
+    }
+  }
+  const rms = Math.sqrt(sumSquares / (3 * topology.atomCount));
+  assert.ok(worst / rms < 1e-6, `worst force error ${worst} against rms ${rms}`);
+});
+
+test("SHAKE restores every constrained length after a perturbation", () => {
+  const topology = parsePrmtop(read("ala-wat.prmtop"));
+  const coordinates = parseInpcrd(read("ala-wat.inpcrd"),
+    { expectedAtomCount: topology.atomCount });
+  const system = buildSystem(topology, {
+    constraints: "HBonds", rigidWater: true, cutoff: 1.0, box: coordinates.box,
+  });
+  const positions = Float64Array.from(coordinates.positions);
+  const reference = Float64Array.from(coordinates.positions);
+  for (let index = 0; index < positions.length; index += 1) {
+    positions[index] += Math.sin(index * 12.9898) * 0.004;
+  }
+  const result = applyPositionConstraints(system, positions, reference, { tolerance: 1e-8 });
+  assert.ok(result.converged, "SHAKE must converge");
+  for (let index = 0; index < system.constraints.count; index += 1) {
+    const a = system.constraints.atomA[index];
+    const b = system.constraints.atomB[index];
+    const length = Math.hypot(
+      positions[a * 3] - positions[b * 3],
+      positions[a * 3 + 1] - positions[b * 3 + 1],
+      positions[a * 3 + 2] - positions[b * 3 + 2],
+    );
+    const error = Math.abs(length - system.constraints.distance[index])
+      / system.constraints.distance[index];
+    assert.ok(error < 1e-7, `constraint ${index} off by ${error}`);
+  }
+});
+
+test("temperature uses the constrained degree-of-freedom count", () => {
+  const topology = parsePrmtop(read("ala-wat.prmtop"));
+  const coordinates = parseInpcrd(read("ala-wat.inpcrd"),
+    { expectedAtomCount: topology.atomCount });
+  const system = buildSystem(topology, {
+    constraints: "HBonds", rigidWater: true, cutoff: 1.0, box: coordinates.box,
+  });
+  // Unit velocities give a kinetic energy of (1/2) sum(m), so the temperature
+  // is a pure statement about the denominator.
+  const velocities = new Float64Array(topology.atomCount * 3).fill(1);
+  const { kineticEnergy, temperature } = instantaneousTemperature(system, velocities);
+  let massSum = 0;
+  for (const mass of topology.masses) massSum += mass;
+  assert.ok(Math.abs(kineticEnergy - 1.5 * massSum) < 1e-6);
+  const expected = (2 * kineticEnergy) / (system.degreesOfFreedom * 0.008314462618);
+  assert.ok(Math.abs(temperature - expected) < 1e-9);
+});
+
+test("the cell stencil is deduplicated so no cell is visited twice", async () => {
+  const { planCellList } = await import("../shared/topology/cells.js");
+  const topology = parsePrmtop(read("ala-wat.prmtop"));
+  const coordinates = parseInpcrd(read("ala-wat.inpcrd"),
+    { expectedAtomCount: topology.atomCount });
+  for (const cutoff of [1.0, 0.7, 0.5]) {
+    const system = buildSystem(topology, {
+      constraints: "HBonds", rigidWater: true, cutoff, box: coordinates.box,
+    });
+    const plan = planCellList(system, { skin: 0.1 });
+    // Every stencil entry must land on a distinct cell after wrapping. A naive
+    // 3x3x3 on a 2-cell axis visits the same cell twice and double-counts
+    // every pair in it.
+    const visited = new Set();
+    for (const [dx, dy, dz] of plan.stencil) {
+      const wrap = (value, count) => ((value % count) + count) % count;
+      visited.add(`${wrap(dx, plan.counts[0])},${wrap(dy, plan.counts[1])},${wrap(dz, plan.counts[2])}`);
+    }
+    assert.equal(visited.size, plan.stencil.length,
+      `cutoff ${cutoff}: stencil visits ${plan.stencil.length} entries but only ${visited.size} distinct cells`);
+    // The cell must be at least the list cutoff, or a one-deep stencil misses pairs.
+    for (let axis = 0; axis < 3; axis += 1) {
+      const size = Math.abs(plan.widths[axis]) / plan.counts[axis];
+      assert.ok(size >= plan.listCutoff - 1e-12,
+        `cutoff ${cutoff}: cell size ${size} on axis ${axis} is below the list cutoff ${plan.listCutoff}`);
+    }
+  }
+});
+
+test("exclusions are symmetric and sorted for the kernel's binary search", async () => {
+  const { buildExclusionGather } = await import("../shared/topology/cells.js");
+  const topology = parsePrmtop(read("ala-vac.prmtop"));
+  const system = buildSystem(topology, { constraints: "none", rigidWater: false, cutoff: 0 });
+  const gather = buildExclusionGather(system);
+  assert.equal(gather.partners.length, 2 * topology.exclusions.pairCount,
+    "every one-sided AMBER exclusion must appear in both directions");
+  for (let atom = 0; atom < topology.atomCount; atom += 1) {
+    const slice = gather.partners.subarray(gather.start[atom], gather.start[atom + 1]);
+    for (let index = 1; index < slice.length; index += 1) {
+      assert.ok(slice[index - 1] <= slice[index], `atom ${atom} slice is not sorted`);
+    }
+  }
+  // Spot-check both directions of every stored pair.
+  for (let atom = 0; atom < topology.atomCount; atom += 1) {
+    const begin = topology.exclusions.start[atom];
+    const end = topology.exclusions.start[atom + 1];
+    for (let cursor = begin; cursor < end; cursor += 1) {
+      const partner = topology.exclusions.partners[cursor];
+      const forward = gather.partners.subarray(gather.start[atom], gather.start[atom + 1]);
+      const backward = gather.partners.subarray(gather.start[partner], gather.start[partner + 1]);
+      assert.ok(forward.includes(partner), `${atom} -> ${partner} missing`);
+      assert.ok(backward.includes(atom), `${partner} -> ${atom} missing`);
+    }
+  }
+});
+
+test("exception gather duplicates each pair onto both atoms with the right products", async () => {
+  const { buildExceptionGather } = await import("../shared/topology/cells.js");
+  const topology = parsePrmtop(read("ala-vac.prmtop"));
+  const system = buildSystem(topology, { constraints: "none", rigidWater: false, cutoff: 0 });
+  const gather = buildExceptionGather(system);
+  assert.equal(gather.count, 2 * system.exceptions.count);
+  // The Ewald correction uses the atoms' FULL charges, which is the fourth
+  // parameter and is NOT the scaled product in the first.
+  for (let atom = 0; atom < topology.atomCount; atom += 1) {
+    for (let slot = gather.start[atom]; slot < gather.start[atom + 1]; slot += 1) {
+      const partner = gather.partners[slot];
+      const expected = topology.charges[atom] * topology.charges[partner];
+      const stored = gather.parameters[slot * 4 + 3];
+      assert.ok(Math.abs(stored - expected) < 1e-6 * Math.max(Math.abs(expected), 1e-6),
+        `full charge product for ${atom}-${partner}: stored ${stored}, expected ${expected}`);
+    }
+  }
+});
+
+test("the DCD header and unit cell match the layout OpenMM writes", async () => {
+  const { DcdWriter, cellFromVectors } = await import("../shared/traj/dcd.js");
+  const writer = new DcdWriter({
+    atomCount: 3, timestep: 0.002, interval: 5, periodic: true,
+  });
+  const positions = Float64Array.from([0, 0, 0, 0.1, 0.2, 0.3, -0.4, 0.5, -0.6]);
+  const box = Float64Array.from([2.5, 0, 0, 0.3, 2.6, 0, 0.4, 0.5, 2.7]);
+  writer.appendFrame(positions, box);
+  writer.appendFrame(positions, box);
+  const bytes = writer.finish();
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+
+  assert.equal(view.getInt32(0, true), 84, "leading record marker");
+  assert.equal(String.fromCharCode(...bytes.slice(4, 8)), "CORD");
+  assert.equal(view.getInt32(8, true), 2, "frame count");
+  assert.equal(view.getInt32(16, true), 5, "interval");
+  // (NSET - 1) * NSAVC, which is how OpenMM fills this field.
+  assert.equal(view.getInt32(20, true), 5, "last frame's step");
+  // delta is in AKMA units, not picoseconds - 2 fs stores as 0.0409.
+  assert.ok(Math.abs(view.getFloat32(44, true) - 0.002 / 0.04888821) < 1e-6);
+  assert.equal(view.getInt32(48, true), 1, "unit-cell flag");
+  assert.equal(view.getInt32(84, true), 24, "format version");
+  assert.equal(view.getInt32(268, true), 3, "atom count");
+
+  // 🔴 THE CELL ORDER IS [a, cos(gamma), b, cos(beta), cos(alpha), c], which is
+  // invisible on a rectangular box because all three cosines are zero there.
+  const cell = cellFromVectors(box);
+  assert.ok(Math.abs(cell[0] - 25) < 1e-9, "a in angstroms");
+  assert.ok(Math.abs(cell[2] - Math.hypot(0.3, 2.6) * 10) < 1e-9, "b in angstroms");
+  assert.ok(Math.abs(cell[5] - Math.hypot(0.4, 0.5, 2.7) * 10) < 1e-9, "c in angstroms");
+  const cosGamma = 0.3 * 2.5 / (2.5 * Math.hypot(0.3, 2.6));
+  assert.ok(Math.abs(cell[1] - cosGamma) < 1e-12, "slot 1 is cos(gamma)");
+});
+
+test("a periodic DCD refuses a frame with no box", async () => {
+  const { DcdWriter } = await import("../shared/traj/dcd.js");
+  const writer = new DcdWriter({ atomCount: 1, timestep: 0.002, interval: 1, periodic: true });
+  assert.throws(() => writer.appendFrame(Float64Array.from([0, 0, 0])), /needs its box/);
+});
+
+test("an AMBER restart round-trips through this port's own reader", async () => {
+  const { writeRestart } = await import("../shared/traj/rst7.js");
+  const coordinates = parseInpcrd(read("ala-wat.inpcrd"));
+  const velocities = new Float64Array(coordinates.positions.length);
+  for (let index = 0; index < velocities.length; index += 1) {
+    velocities[index] = Math.sin(index * 0.7) * 0.5;
+  }
+  const text = writeRestart({
+    positions: coordinates.positions, velocities, box: coordinates.box, time: 1.5,
+  });
+  const again = parseInpcrd(text, { expectedAtomCount: coordinates.atomCount });
+  assert.equal(again.atomCount, coordinates.atomCount);
+  assert.equal(again.time, 1.5);
+  for (let index = 0; index < coordinates.positions.length; index += 1) {
+    // The format stores seven decimals of an angstrom, i.e. 1e-8 nm.
+    assert.ok(Math.abs(again.positions[index] - coordinates.positions[index]) < 1e-7);
+  }
+  for (let index = 0; index < velocities.length; index += 1) {
+    assert.ok(Math.abs(again.velocities[index] - velocities[index]) < 1e-6,
+      `velocity ${index}: wrote ${velocities[index]}, read ${again.velocities[index]}`);
+  }
+  for (let axis = 0; axis < 3; axis += 1) {
+    assert.ok(Math.abs(again.box.lengths[axis] - coordinates.box.lengths[axis]) < 1e-7);
+  }
+});
+
+test("a coordinate that overflows the restart's 12 columns is refused", async () => {
+  const { writeRestart } = await import("../shared/traj/rst7.js");
+  // 🔴 A TRUNCATED FIELD SHIFTS EVERY VALUE AFTER IT BY ONE COLUMN, producing a
+  // file that parses and whose coordinates are nonsense from that point on.
+  assert.throws(
+    () => writeRestart({ positions: Float64Array.from([1e6, 0, 0]) }),
+    /does not fit the 12-column restart format/,
+  );
+});
+
+test("the dispersion correction reproduces OpenMM's own value", async () => {
+  const { dispersionCoefficients, dispersionEnergy } = await import("../shared/dispersion.js");
+  const topology = parsePrmtop(read("ala-wat.prmtop"));
+  const coordinates = parseInpcrd(read("ala-wat.inpcrd"),
+    { expectedAtomCount: topology.atomCount });
+  const system = buildSystem(topology, {
+    constraints: "HBonds", rigidWater: true, cutoff: 1.0, box: coordinates.box,
+  });
+  const volume = Math.abs(system.boxVectors[0] * system.boxVectors[4] * system.boxVectors[8]);
+  const energy = dispersionEnergy(dispersionCoefficients(system), volume, 1.0);
+  // Isolated by running the oracle with and without
+  // NonbondedForce.useDispersionCorrection.
+  assert.ok(Math.abs(energy - -41.537158) / 41.537158 < 1e-6,
+    `dispersion correction ${energy}, OpenMM reports -41.537158`);
+  // 🔴 IT SCALES AS 1/V, WHICH IS WHY THE BAROSTAT NEEDS IT: a term that
+  // depends on the volume contributes to the pressure.
+  const scaled = dispersionEnergy(dispersionCoefficients(system), volume * 1.05, 1.0);
+  assert.ok(Math.abs(scaled / energy - 1 / 1.05) < 1e-12);
+});
+
+test("the Metropolis weight includes the molecular volume entropy", async () => {
+  const { metropolisWeight } = await import("../webgpu/kernels/barostat.js");
+  // 🔴 THE `N ln(V'/V)` TERM COUNTS MOLECULES, NOT ATOMS, and omitting it
+  // biases every NPT run towards smaller volumes. With no energy change and no
+  // pressure, an expansion must be favourable purely from that term.
+  const expand = metropolisWeight(
+    { deltaEnergy: 0, deltaVolume: 0.1, volumeRatio: 1.01 }, 0, 2.478, 393);
+  assert.ok(expand < 0, `an entropically favourable expansion gave ${expand}`);
+  const withoutEntropy = metropolisWeight(
+    { deltaEnergy: 0, deltaVolume: 0.1, volumeRatio: 1.01 }, 0, 2.478, 0);
+  assert.equal(withoutEntropy, 0, "with no molecules the term must vanish");
+  // Pressure opposes expansion.
+  const compressed = metropolisWeight(
+    { deltaEnergy: 0, deltaVolume: 0.1, volumeRatio: 1.01 }, 100, 2.478, 393);
+  assert.ok(compressed > expand);
+});

@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RainMD</title>
+<link rel="stylesheet" href="web/rainmd.css">
+</head>
+<body>
+<header>
+  <h1>RainMD</h1>
+  <p class="tagline">Molecular dynamics in the browser, on your own GPU, from an
+  AMBER topology.</p>
+</header>
+
+<main>
+  <section class="panel" id="status-panel">
+    <h2>This machine</h2>
+    <dl id="device-report"><dt>WebGPU</dt><dd>checking…</dd></dl>
+  </section>
+
+  <section class="panel">
+    <h2>Load a system</h2>
+    <p>Drop the <code>.prmtop</code> and <code>.crd</code> (or
+    <code>.inpcrd</code>) that <code>saveamberparm</code> wrote — the pair from
+    one <a href="https://github.com/pablo-arantes/making-it-rain">Making-it-rain</a>
+    notebook run.</p>
+    <div id="drop-zone" class="drop-zone">
+      <input type="file" id="file-input" multiple accept=".prmtop,.parm7,.crd,.inpcrd,.rst7">
+      <label for="file-input">Choose files, or drop them here</label>
+    </div>
+    <p class="hint">No AMBER files to hand? Load one of the systems this
+    repository tests itself against:</p>
+    <div class="example-row">
+      <select id="example">
+        <option value="ala-wat">alanine dipeptide in TIP3P + ions — 1190 atoms, periodic, runs on the GPU</option>
+        <option value="two-body">two peptides in water — 2547 atoms, periodic, splits RMSD four ways</option>
+        <option value="mixed">helix + loop + strand — 234 atoms, vacuum, for the cartoon ribbon</option>
+        <option value="helix">alpha helix — 162 atoms, vacuum</option>
+        <option value="strand">beta strand — 162 atoms, vacuum</option>
+      </select>
+      <button id="load-example" type="button">Load example</button>
+    </div>
+    <p class="hint">A vacuum system has no periodic box, so the GPU engine
+    refuses it — it implements PME, which needs one. Those three are there to
+    look at; the two periodic ones are there to run.</p>
+    <dl id="system-report" hidden></dl>
+    <p id="load-error" class="error" hidden></p>
+  </section>
+
+  <section class="panel" id="run-panel" hidden>
+    <h2>Run</h2>
+    <div class="controls">
+      <label>Nonbonded
+        <select id="method">
+          <option value="PME">PME</option>
+          <option value="NoCutoff">NoCutoff (non-periodic only)</option>
+        </select>
+      </label>
+      <label>Constraints
+        <select id="constraints">
+          <option value="HBonds">HBonds</option>
+          <option value="none">none</option>
+          <option value="AllBonds">AllBonds</option>
+        </select>
+      </label>
+      <label>Cutoff / nm <input type="number" id="cutoff" value="1.0" step="0.1" min="0.5"></label>
+      <label>Temperature / K <input type="number" id="temperature" value="298" step="1"></label>
+      <label>Timestep / fs <input type="number" id="timestep" value="2" step="0.5" min="0.5"></label>
+      <label>Friction / ps⁻¹ <input type="number" id="friction" value="10" step="1" min="0"></label>
+      <label>Pressure / bar <input type="number" id="pressure" value="" step="1" placeholder="blank = NVT"></label>
+      <label>Steps <input type="number" id="steps" value="100" step="10" min="1"></label>
+    </div>
+      <label>Trajectory every / steps <input type="number" id="trajectory" value="50" step="10" min="0"></label>
+      <label>Neighbour rebuild / steps <input type="number" id="rebuild" value="20" step="5" min="1"></label>
+      <label>Engine
+        <select id="engine">
+          <option value="gpu">GPU (WebGPU)</option>
+          <option value="host">host reference (slow, for comparison)</option>
+        </select>
+      </label>
+    </div>
+    <div class="buttons">
+      <button id="run">Run dynamics</button>
+      <button id="stop" disabled>Stop</button>
+      <button id="minimise">Minimise</button>
+      <button id="pause" disabled>Pause</button>
+      <button id="check-gpu">Check the GPU kernels</button>
+    </div>
+    <div class="buttons">
+      <button id="download-dcd" disabled>trajectory (.dcd)</button>
+      <button id="download-state" disabled>restart (.rst7)</button>
+      <button id="download-pdb" disabled>current frame (.pdb)</button>
+      <button id="download-metrics" disabled>metrics (.csv)</button>
+      <button id="download-rmsf" disabled>per-residue RMSF (.csv)</button>
+    </div>
+    <dl id="live" class="live"></dl>
+
+    <div class="view-bar">
+      <label>Show
+        <select id="view-preset"></select>
+      </label>
+      <label>Draw
+        <select id="representation">
+          <option value="spheres">atoms</option>
+          <option value="ribbon">cartoon ribbon</option>
+          <option value="both">ribbon + atoms</option>
+        </select>
+      </label>
+      <label>Colour by
+        <select id="colour-by">
+          <option value="element">element</option>
+          <option value="group">receptor / binder / solvent</option>
+          <option value="structure">secondary structure</option>
+        </select>
+      </label>
+      <label id="binder-row" hidden>Binder
+        <select id="binder" title="Which solute molecule is the binder. An AMBER topology carries no chain IDs, so this is the molecule list instead."></select>
+      </label>
+      <span id="view-counts" class="hint"></span>
+    </div>
+    <canvas id="viewer" class="viewer"></canvas>
+    <p class="hint">Drag to rotate, scroll to zoom. The viewer reads a
+    device-side copy of the simulation's own position buffer, so drawing a frame
+    sends nothing to the browser.</p>
+
+    <div class="panels" id="panels">
+      <canvas id="plot-rmsd" class="plot"></canvas>
+      <canvas id="plot-rg" class="plot"></canvas>
+      <canvas id="plot-energy" class="plot"></canvas>
+      <canvas id="plot-rmsf" class="plot"></canvas>
+      <canvas id="plot-iface" class="plot"></canvas>
+      <canvas id="plot-temperature" class="plot"></canvas>
+    </div>
+    <pre id="log" class="log"></pre>
+  </section>
+
+  <section class="panel caveat">
+    <h2>What is actually running</h2>
+    <p>The force field, the topology parse, every force term and the integrator
+    are validated against OpenMM — per-atom forces agree to 5.2×10⁻⁸. Those
+    numbers and the commands that produce them are in
+    <code>docs/STATUS.md</code>.</p>
+    <p>The <strong>GPU force path is complete</strong>: bonded, cell list,
+    neighbour list, direct-space nonbonded and PME all run on your GPU and
+    reproduce OpenMM's total energy to 1.5&times;10<sup>&minus;6</sup> and its
+    per-atom forces to 8.8&times;10<sup>&minus;5</sup>. The button above runs the
+    bonded differential test on your own hardware; <code>npm run test:gpu</code>
+    runs all five.</p>
+    <p>Minimisation, dynamics, the constraint solver and the barostat all run on
+    the device, and a block of steps is encoded into one command buffer so nothing
+    in a step reads back to the browser. Measured on a 1190-atom test system:
+    <strong>0.8&nbsp;ms per step, about 215&nbsp;ns/day</strong> in NVT, with an
+    energy drift of 0.30&nbsp;kJ/mol per ns per atom over 20&nbsp;ps. The viewer
+    binds a copy of the same position buffer, so drawing a frame sends nothing to
+    the host.</p>
+    <p>Leave <em>Pressure</em> blank for NVT, or give it a value for NPT. The
+    barostat is isotropic and synchronises with the browser once per move, which
+    costs about 0.3&nbsp;ms per step.</p>
+    <p>The live analysis follows
+    <a href="https://github.com/BioCoder007/JIGGLE">JIGGLE</a>'s design, including
+    its four-way RMSD split for two-body systems. The one that matters is
+    <strong>binder fitted on receptor</strong>: a whole-complex RMSD averages a
+    ligand's drift across every receptor atom that did not move, so a ligand
+    coming loose barely registers. Measured here &mdash; a binder displaced by
+    exactly 0.500&nbsp;nm shows <strong>0.243&nbsp;nm</strong> in the combined
+    trace and <strong>0.500&nbsp;nm</strong> when fitted on the receptor. The
+    centroid interface distance misses it too: a 60&deg; rotation of the binder
+    about its own centroid moves it by 0.016&nbsp;nm while the fitted RMSD sees
+    0.349&nbsp;nm.</p>
+    <p>Every metric agrees with MDAnalysis to 2&times;10<sup>&minus;8</sup>&nbsp;nm
+    on a trajectory this engine wrote, per-residue RMSF included.</p>
+    <p><strong>What this page does not do:</strong> no sticks or cartoons in the
+    viewer, no secondary structure, no anisotropic barostat for membranes, and no
+    binding free energy. The trajectory it writes is a standard DCD so cpptraj,
+    MDAnalysis, VMD and MM/GBSA tooling can do the rest.</p>
+  </section>
+</main>
+
+<script type="module" src="web/app.js"></script>
+</body>
+</html>
