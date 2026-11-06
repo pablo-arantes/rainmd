@@ -68,10 +68,7 @@
       <label>Temperature / K <input type="number" id="temperature" value="298" step="1"></label>
       <label>Timestep / fs <input type="number" id="timestep" value="2" step="0.5" min="0.5"></label>
       <label>Friction / ps⁻¹ <input type="number" id="friction" value="10" step="1" min="0"></label>
-      <label>Pressure / bar <input type="number" id="pressure" value="" step="1" placeholder="blank = NVT"></label>
-      <label>Steps <input type="number" id="steps" value="100" step="10" min="1"></label>
-    </div>
-      <label>Trajectory every / steps <input type="number" id="trajectory" value="50" step="10" min="0"></label>
+      <label>Pressure / bar <input type="number" id="pressure" value="1" step="1" placeholder="blank = NVT"></label>
       <label>Neighbour rebuild / steps <input type="number" id="rebuild" value="20" step="5" min="1"></label>
       <label>Engine
         <select id="engine">
@@ -80,10 +77,58 @@
         </select>
       </label>
     </div>
+
+    <!-- The three stages, in the order the Making-it-rain notebooks run them.
+         Each has its own button because the notebooks are separate cells and
+         because a 500 ns production is not something to start by accident. -->
+    <h3>1 — Minimise</h3>
+    <div class="controls">
+      <label>Steps
+        <select id="min-steps">
+          <option>1000</option><option>5000</option><option selected>10000</option>
+          <option>20000</option><option>50000</option><option>100000</option>
+        </select>
+      </label>
+      <span class="hint">Tolerance 10 kJ/mol/nm, as the notebooks set it.</span>
+    </div>
     <div class="buttons">
-      <button id="run">Run dynamics</button>
-      <button id="stop" disabled>Stop</button>
       <button id="minimise">Minimise</button>
+      <button id="calibrate" disabled>Time this system</button>
+    </div>
+
+    <h3>2 — Equilibrate <span class="hint">NPT, solute restrained</span></h3>
+    <div class="controls">
+      <label>Time / ns <input type="number" id="eq-time" value="0.2" step="0.1" min="0"></label>
+      <label>Restraint / kJ/mol/nm²
+        <input type="number" id="eq-restraint" value="500" step="100" min="0" max="2000">
+      </label>
+      <label>Trajectory every / ps
+        <select id="eq-write">
+          <option>1</option><option selected>10</option><option>100</option><option>200</option>
+          <option>500</option><option>1000</option>
+        </select>
+      </label>
+      <span class="hint" id="eq-estimate"></span>
+    </div>
+    <div class="buttons">
+      <button id="equilibrate" disabled>Equilibrate</button>
+    </div>
+
+    <h3>3 — Production <span class="hint">NPT, unrestrained</span></h3>
+    <div class="controls">
+      <label>Time per stride / ns <input type="number" id="prod-time" value="2" step="1" min="0"></label>
+      <label>Strides <input type="number" id="prod-strides" value="1" step="1" min="1"></label>
+      <label>Trajectory every / ps
+        <select id="prod-write">
+          <option>1</option><option selected>10</option><option>100</option><option>200</option>
+          <option>500</option><option>1000</option>
+        </select>
+      </label>
+      <span class="hint" id="prod-estimate"></span>
+    </div>
+    <div class="buttons">
+      <button id="produce" disabled>Run production</button>
+      <button id="stop" disabled>Stop</button>
       <button id="pause" disabled>Pause</button>
       <button id="check-gpu">Check the GPU kernels</button>
     </div>

@@ -25,6 +25,7 @@ import { StructureViewer } from "./viewer.js";
 import { buildSelections, VIEW_PRESETS, BODY_COLOURS } from "../shared/analysis/selection.js";
 import { secondaryOfAtoms } from "../shared/analysis/secondary.js";
 import { buildRibbon } from "../shared/analysis/ribbon.js";
+import { soluteHeavyAtoms } from "../shared/topology/restraints.js";
 import { LiveAnalysis } from "../shared/analysis/metrics.js";
 import { writePdb } from "../shared/traj/pdb.js";
 
@@ -45,6 +46,10 @@ let resumeGate = null;
 let lastPositions = null;
 let selectionSystem = null;
 let binderOverride = null;
+/** ms/step measured on THIS system, or null until someone measures it. */
+let measuredMsPerStep = null;
+/** Which stages have run, so a later stage cannot start before an earlier one. */
+const stagesDone = { minimise: false, equilibrate: false };
 
 function log(line = "") {
   logBox.textContent += `${line}\n`;
@@ -236,6 +241,7 @@ async function loadFiles(files) {
     ]);
     populateBinders();
     populatePresets();
+    element("representation").value = defaultRepresentation();
     // 🔴 DRAW ON LOAD, NOT ON RUN. The viewer used to be created by
     // `attachViewer` inside Minimise and Run, so dropping a topology showed a
     // black rectangle until the user started something - and a reader with a
@@ -287,6 +293,30 @@ function runOptions(method) {
     seed: 20261106,
     tolerance: 1e-5,
   };
+}
+
+/**
+ * Draw the structure at a named moment, rather than every reporting frame.
+ *
+ * 🔴 THREE MOMENTS ARE WORTH A PICTURE AND A LIVE ANIMATION IS NOT ONE OF THEM:
+ * the system as loaded, the structure after minimisation, and the last frame
+ * when the run finishes. Drawing every report cost a full position readback, a
+ * styles rebuild and - in the cartoon modes - a whole ribbon rebuild, per
+ * frame, for an animation nobody watches through a multi-hour production run.
+ * The trajectory is still written, so the motion is not lost; it is just looked
+ * at afterwards, in this viewer or in VMD.
+ *
+ * Measured on the two-body fixture: 4000 steps went from 2.69 to 2.09 ms/step
+ * with the per-frame draw removed, which is 22% of the run.
+ */
+function showCheckpoint(what) {
+  if (loaded === null || viewer === null) return;
+  const positions = lastPositions ?? hostState?.positions
+    ?? loaded.coordinates.positions;
+  applyView(viewer, { topology: loaded.topology }, positions);
+  viewer.upload(positions);
+  viewer.draw();
+  if (what !== undefined) log(`  viewer: showing the structure ${what}`);
 }
 
 /** Draw the coordinates as loaded, before anything has been run. */
@@ -421,6 +451,25 @@ function populatePresets() {
   select.value = selections.counts.ligand > 0 ? "protein-ligand" : "solute";
 }
 
+/**
+ * Pick the representation a reader would have picked.
+ *
+ * 🔴 THE CARTOON EXISTED AND NOBODY SAW IT, because "atoms" was the default and
+ * the control that changes it is a dropdown in a row of dropdowns. A renderer
+ * that has to be found is a renderer that is not there: the first report after
+ * it shipped was that the page still had no cartoon. So anything with a protein
+ * backbone opens as a ribbon, with the atoms alongside when there is a ligand
+ * to see - which is what a cartoon is FOR, looking at a fold - and a system
+ * with no backbone at all still opens as atoms, because a ribbon needs alpha
+ * carbons and a box of water has none.
+ */
+function defaultRepresentation() {
+  if (selections === null) return "spheres";
+  const backbone = selections.counts.alphaCarbon ?? 0;
+  if (backbone < 4) return "spheres";
+  return selections.counts.ligand > 0 ? "both" : "ribbon";
+}
+
 function currentPreset() {
   return VIEW_PRESETS.find((preset) => preset.id === element("view-preset").value)
     ?? VIEW_PRESETS[0];
@@ -513,7 +562,12 @@ element("minimise").addEventListener("click", async () => {
         attachViewer(simulation, system);
         log("minimising on the GPU (steepest descent, backtracking)…");
         await yieldToBrowser();
-        const result = await simulation.minimise({ maxIterations: 200, forceTolerance: 500 });
+        const result = await simulation.minimise({
+          // The notebooks' own settings: steps from the dropdown, tolerance
+          // 10 kJ/mol/nm.
+          maxIterations: Math.max(1, Math.round(numberOf("min-steps"))),
+          forceTolerance: 10,
+        });
         log(`  potential ${result.history[0].potential.toFixed(2)} → `
           + `${result.potential.toFixed(2)} kJ/mol in ${result.iterations} iterations`);
         log(`  max force ${result.history[0].maxForce.toFixed(0)} → `
@@ -560,6 +614,18 @@ element("minimise").addEventListener("click", async () => {
     log(`error: ${error.stack ?? error.message}`);
   } finally {
     button.disabled = false;
+    // 🔴 A STAGE UNLOCKS THE NEXT ONE, AS THE NOTEBOOKS' CELLS DO. Running
+    // production on an unminimised structure is the single easiest way to get
+    // a trajectory that looks fine and started from a clash, and nothing in
+    // the output would say so. The notebooks make it impossible by reading the
+    // previous cell's restart file; this makes it impossible by gating.
+    stagesDone.minimise = true;
+    element("equilibrate").disabled = false;
+    element("calibrate").disabled = false;
+    // Show what the minimiser produced, which is the second of the two moments
+    // worth looking at a structure.
+    showCheckpoint("after minimisation");
+    refreshEstimates();
   }
 });
 
@@ -691,11 +757,118 @@ element("pause").addEventListener("click", () => {
   log(paused ? "  paused — the integrator is not being advanced" : "  resumed");
 });
 
-element("run").addEventListener("click", async () => {
+/**
+ * Time this system, so the estimates are a measurement rather than a guess.
+ *
+ * 🔴 A SHORT BURST ON THE REAL SYSTEM, BECAUSE ms/step IS NOT PORTABLE. It
+ * depends on the atom count, the PME grid, the neighbour density and the GPU -
+ * the test fixture runs at 1.0 ms/step and the two-body one at 2.7 on the same
+ * machine. Estimating from anything but the system in front of the reader would
+ * be inventing a number, and the whole purpose of the estimate is to tell
+ * someone that the 500 ns they typed is eight days.
+ */
+element("calibrate").addEventListener("click", () => runStage("timing", async (engine) => {
+  if (engine !== "gpu") throw new Error("timing is for the device engine");
+  const { system, method } = assembleSystem();
+  if (method !== "PME") throw new Error("the device engine needs a periodic system");
+  const options = runOptions(method);
+  const simulation = new GpuSimulation(gpu.device, system, {
+    ...options, rebuildInterval: Math.max(1, numberOf("rebuild")), barostatInterval: 25,
+  });
+  try {
+    const start = startState(system, options);
+    simulation.setState(start.positions, start.velocities);
+    await simulation.initialise();
+    await simulation.run(50, { blockSize: 25 });          // warm the pipelines
+    const began = performance.now();
+    const burst = 300;
+    await simulation.run(burst, { blockSize: 25, stopSignal });
+    measuredMsPerStep = (performance.now() - began) / burst;
+    const timestepPs = options.timestep;
+    const perDay = ((burst * timestepPs) / 1000)
+      / ((measuredMsPerStep * burst) / 1000 / 86400);
+    log("");
+    log(`timing: ${measuredMsPerStep.toFixed(2)} ms/step on this system `
+      + `(${perDay.toFixed(0)} ns/day at ${options.timestep * 1000} fs)`);
+    log("  the estimates beside each stage are now measured rather than blank");
+  } finally { simulation.release(); }
+}));
+
+/**
+ * Steps from a duration, which is how the notebooks ask for it.
+ *
+ * 🔴 NANOSECONDS, BECAUSE NOBODY PLANS A SIMULATION IN STEPS. The notebooks
+ * take `Time` in ns and derive `nsteps = time_ps / dt_ps`; this page used to
+ * take steps directly, which makes the one number a reader has in mind - "I
+ * need 500 ns" - something they have to convert, with the timestep, in their
+ * head. It also hid the cost: 500 ns at 2 fs is 250 million steps.
+ */
+const stepsForNanoseconds = (nanoseconds, timestepPs) =>
+  Math.max(0, Math.round((nanoseconds * 1000) / timestepPs));
+
+/** Reporting interval in steps, from an interval in picoseconds. */
+const stepsForPicoseconds = (picoseconds, timestepPs) =>
+  Math.max(1, Math.round(picoseconds / timestepPs));
+
+/** "3 d 4 h", "2 h 15 min", "45 s" - whichever units the number deserves. */
+function humanDuration(seconds) {
+  if (!Number.isFinite(seconds) || seconds < 0) return "—";
+  if (seconds < 90) return `${seconds.toFixed(0)} s`;
+  const minutes = seconds / 60;
+  if (minutes < 90) return `${minutes.toFixed(0)} min`;
+  const hours = minutes / 60;
+  if (hours < 48) return `${hours.toFixed(1)} h`;
+  return `${(hours / 24).toFixed(1)} days`;
+}
+
+/**
+ * Put the cost of each stage on screen, from a MEASURED rate where there is one.
+ *
+ * 🔴 THE HONEST NUMBER IS THE POINT, NOT THE PROGRESS BAR. Literature protocols
+ * are hundreds of nanoseconds, and this page will not reach them for a solvated
+ * protein - at the measured 2.7 ms/step a 1190-atom box does about 64 ns/day,
+ * so 500 ns is roughly eight days of a tab staying open. Someone who types 500
+ * deserves to see that before they press the button, not after.
+ */
+function refreshEstimates() {
+  const timestepPs = numberOf("timestep") / 1000;
+  const rate = measuredMsPerStep;
+  const describe = (steps) => {
+    const nanoseconds = (steps * timestepPs) / 1000;
+    if (rate === null) {
+      return `${steps.toLocaleString()} steps — press “Time this system” for a wall-clock estimate`;
+    }
+    const seconds = (steps * rate) / 1000;
+    const perDay = (nanoseconds / seconds) * 86400;
+    return `${steps.toLocaleString()} steps ≈ ${humanDuration(seconds)} `
+      + `at ${rate.toFixed(2)} ms/step (${perDay.toFixed(0)} ns/day)`;
+  };
+  element("eq-estimate").textContent =
+    describe(stepsForNanoseconds(numberOf("eq-time"), timestepPs));
+  const strides = Math.max(1, Math.round(numberOf("prod-strides")));
+  element("prod-estimate").textContent =
+    describe(stepsForNanoseconds(numberOf("prod-time") * strides, timestepPs));
+}
+
+for (const control of ["timestep", "eq-time", "prod-time", "prod-strides"]) {
+  element(control).addEventListener("input", refreshEstimates);
+}
+
+/**
+ * Run one stage, with the bookkeeping every stage shares.
+ *
+ * 🔴 ONE DRIVER FOR BOTH STAGES, because equilibration and production differ in
+ * exactly two things - the restraint and the duration - and everything else
+ * about them is identical. Two copies of this would be two places to forget to
+ * re-enable the Stop button.
+ */
+async function runStage(label, body) {
   if (loaded === null) return;
-  const runButton = element("run");
+  const buttons = ["minimise", "equilibrate", "produce", "calibrate"];
   const stopButton = element("stop");
-  runButton.disabled = true;
+  for (const id of buttons) element(id).disabled = true;
+  stopButton.disabled = false;
+  element("pause").disabled = false;
   stopButton.disabled = false;
   element("pause").disabled = false;
   // 🔴 THE SPLIT IS FROZEN WHILE A RUN IS IN FLIGHT. `LiveAnalysis` takes the
@@ -707,26 +880,91 @@ element("run").addEventListener("click", async () => {
   paused = false;
   element("pause").textContent = "Pause";
   stopSignal = new StopSignal();
-  ensurePlot().clear();
   try {
     const engine = element("engine").value;
     if (engine === "gpu" && gpu === null) throw new Error("no WebGPU device");
-    if (engine === "gpu") await runOnDevice();
-    else await runOnHost();
+    await body(engine);
   } catch (error) {
-    log(error.name === "SimulationStopped" ? `  stopped` : `error: ${error.stack ?? error.message}`);
+    log(error.name === "SimulationStopped" ? "  stopped" : `error: ${error.stack ?? error.message}`);
   } finally {
-    runButton.disabled = false;
     stopButton.disabled = true;
     element("pause").disabled = true;
     element("binder").disabled = false;
     paused = false;
     resumeGate = null;
     stopSignal = null;
+    element("minimise").disabled = false;
+    element("calibrate").disabled = false;
+    // Equilibration needs a minimised structure; production needs an
+    // equilibrated one. The notebooks enforce that by being separate cells
+    // that read the previous one's restart file.
+    element("equilibrate").disabled = stagesDone.minimise !== true;
+    element("produce").disabled = stagesDone.equilibrate !== true;
+    refreshEstimates();
   }
-});
+}
 
-async function runOnDevice() {
+element("equilibrate").addEventListener("click", () => runStage("equilibration", async (engine) => {
+  const timestepPs = numberOf("timestep") / 1000;
+  const steps = stepsForNanoseconds(numberOf("eq-time"), timestepPs);
+  if (steps === 0) throw new Error("equilibration time is zero");
+  const { system } = assembleSystem();
+  const selections = buildSelections(system);
+  const restraintAtoms = soluteHeavyAtoms(system, selections);
+  const force = Math.max(0, numberOf("eq-restraint"));
+  log("");
+  log(`equilibration: ${numberOf("eq-time")} ns = ${steps.toLocaleString()} steps, `
+    + `NPT, ${restraintAtoms.length} solute heavy atoms restrained at `
+    + `${force} kJ/mol/nm²`);
+  if (force === 0) {
+    log("  note: a zero force constant is an unrestrained equilibration, which "
+      + "lets the solute drift while the water finds its density");
+  }
+  await runDynamics(engine, {
+    steps,
+    writeEverySteps: stepsForPicoseconds(Number(element("eq-write").value), timestepPs),
+    restraintForce: force,
+    restraintAtoms,
+    stage: "equilibration",
+  });
+  stagesDone.equilibrate = true;
+}));
+
+element("produce").addEventListener("click", () => runStage("production", async (engine) => {
+  const timestepPs = numberOf("timestep") / 1000;
+  const perStride = stepsForNanoseconds(numberOf("prod-time"), timestepPs);
+  const strides = Math.max(1, Math.round(numberOf("prod-strides")));
+  if (perStride === 0) throw new Error("production time is zero");
+  log("");
+  log(`production: ${strides} × ${numberOf("prod-time")} ns = `
+    + `${(perStride * strides).toLocaleString()} steps, NPT, unrestrained`);
+  for (let stride = 0; stride < strides; stride += 1) {
+    if (strides > 1) log(`  stride ${stride + 1} of ${strides}`);
+    await runDynamics(engine, {
+      steps: perStride,
+      writeEverySteps: stepsForPicoseconds(Number(element("prod-write").value), timestepPs),
+      restraintForce: 0,
+      restraintAtoms: [],
+      stage: strides > 1 ? `production ${stride + 1}/${strides}` : "production",
+      appendTrajectory: stride > 0,
+    });
+  }
+}));
+
+/**
+ * One stage of dynamics, on whichever engine was chosen.
+ *
+ * 🔴 THE STAGE SUPPLIES ITS DURATION AND ITS RESTRAINT; EVERYTHING ELSE IS THE
+ * SYSTEM'S. That division is what lets equilibration and production share this
+ * function - they are the same integrator over the same topology, differing in
+ * a force constant and a step count.
+ */
+async function runDynamics(engine, stageConfig) {
+  if (engine !== "gpu") return runOnHost(stageConfig);
+  return runOnDevice(stageConfig);
+}
+
+async function runOnDevice(stageConfig = {}) {
   const { system, method } = assembleSystem();
   if (method !== "PME") {
     throw new Error(
@@ -735,12 +973,19 @@ async function runOnDevice() {
     );
   }
   const options = runOptions(method);
-  const steps = numberOf("steps");
-  const trajectoryInterval = numberOf("trajectory");
+  const steps = stageConfig.steps ?? 0;
+  const trajectoryInterval = stageConfig.writeEverySteps ?? 0;
   const rebuildInterval = Math.max(1, numberOf("rebuild"));
 
   const simulation = new GpuSimulation(gpu.device, system, {
     ...options, rebuildInterval, barostatInterval: 25,
+    // 🔴 THE RESTRAINT REFERENCE IS THE STRUCTURE THIS STAGE STARTS FROM, which
+    // after minimisation is the minimised structure - the same thing the
+    // notebooks restrain towards, because they add the force to a context whose
+    // positions are the minimiser's output.
+    restraintForce: stageConfig.restraintForce ?? 0,
+    restraintAtoms: stageConfig.restraintAtoms ?? [],
+    restraintReference: hostState?.positions ?? loaded.coordinates.positions,
   });
   try {
     const start = startState(system, options);
@@ -818,17 +1063,10 @@ async function runOnDevice() {
         extra.push(["density", `${densityOf(system, energy.volume).toFixed(4)} g/cm³`]);
       }
       report(row, extra);
-      if (viewer !== null) {
-        viewer.updateFrom(simulation.resources.positions);
-        // Re-assign only in the one mode whose colours depend on the frame;
-        // every other mode's styles buffer is still valid.
-        if (element("colour-by").value === "structure"
-          || element("representation").value !== "spheres") {
-          applyView(viewer, { topology: system.topology }, lastPositions);
-          viewer.updateFrom(simulation.resources.positions);
-        }
-        viewer.draw();
-      }
+      // 🔴 NO VIEWER WORK HERE - see `showCheckpoint`. The analysis panels are
+      // cheap and are the thing worth watching while a run is going; redrawing
+      // the structure is not, and in a cartoon mode it rebuilt the whole ribbon
+      // every report.
       if (writer !== null) writer.appendFrame(lastPositions, system.boxVectors);
       element("download-pdb").disabled = false;
       element("download-metrics").disabled = false;
@@ -838,6 +1076,8 @@ async function runOnDevice() {
     const elapsed = (performance.now() - began) / 1000;
     log(`  ${done} steps in ${elapsed.toFixed(1)} s — ${((elapsed / done) * 1000).toFixed(2)} ms/step`);
 
+    // The third moment worth a picture: where the stage ended up.
+    showCheckpoint(`at the end of ${stageConfig.stage ?? "the run"}`);
     const after = await simulation.diagnostics();
     if (after.barostat !== null) {
       log(`  barostat: ${after.barostat.accepted}/${after.barostat.attempts} moves accepted `
@@ -886,10 +1126,10 @@ async function runOnDevice() {
   }
 }
 
-async function runOnHost() {
+async function runOnHost(stageConfig = {}) {
   const { system, method } = assembleSystem();
   const options = runOptions(method);
-  const steps = numberOf("steps");
+  const steps = stageConfig.steps ?? 0;
   // Unconditional: on a second Run the current state's velocities ARE supplied,
   // so this continues the trajectory rather than restarting it.
   hostState = startState(system, options);

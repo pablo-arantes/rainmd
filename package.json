@@ -6,14 +6,14 @@
   "license": "MIT",
   "scripts": {
     "test": "node --test test/",
-    "test:gpu": "node tools/gpu-node.mjs tools/gpu/check-bonded.mjs && node tools/gpu-node.mjs tools/gpu/check-fft.mjs && node tools/gpu-node.mjs tools/gpu/check-pme.mjs && node tools/gpu-node.mjs tools/gpu/check-nonbonded.mjs && node tools/gpu-node.mjs tools/gpu/check-forces.mjs && node tools/gpu-node.mjs tools/gpu/check-integrator.mjs && node tools/gpu-node.mjs tools/gpu/check-minimiser.mjs && node tools/gpu-node.mjs tools/gpu/check-barostat.mjs && node tools/gpu-node.mjs tools/gpu/check-analysis.mjs && node tools/gpu-node.mjs tools/gpu/check-displacement.mjs && node tools/gpu-node.mjs tools/gpu/probe-ribbon-shader.mjs",
+    "test:gpu": "node tools/gpu-node.mjs tools/gpu/check-bonded.mjs && node tools/gpu-node.mjs tools/gpu/check-fft.mjs && node tools/gpu-node.mjs tools/gpu/check-pme.mjs && node tools/gpu-node.mjs tools/gpu/check-nonbonded.mjs && node tools/gpu-node.mjs tools/gpu/check-forces.mjs && node tools/gpu-node.mjs tools/gpu/check-integrator.mjs && node tools/gpu-node.mjs tools/gpu/check-minimiser.mjs && node tools/gpu-node.mjs tools/gpu/check-barostat.mjs && node tools/gpu-node.mjs tools/gpu/check-analysis.mjs && node tools/gpu-node.mjs tools/gpu/check-displacement.mjs && node tools/gpu-node.mjs tools/gpu/probe-ribbon-shader.mjs && node tools/gpu-node.mjs tools/gpu/check-restraints.mjs",
     "check:openmm": "node tools/check-against-openmm.mjs",
     "check:gradients": "node tools/check-force-gradients.mjs",
     "serve": "python3 tools/serve.py",
     "test:page": "node tools/gpu-page.mjs --check",
     "test:gpu:bonded": "node tools/gpu-node.mjs tools/gpu/check-bonded.mjs",
     "test:gpu:nonbonded": "node tools/gpu-node.mjs tools/gpu/check-nonbonded.mjs",
-    "test:gpu:page": "node tools/gpu-page.mjs --module=tools/gpu/check-bonded.mjs && node tools/gpu-page.mjs --module=tools/gpu/check-fft.mjs && node tools/gpu-page.mjs --module=tools/gpu/check-pme.mjs && node tools/gpu-page.mjs --module=tools/gpu/check-nonbonded.mjs && node tools/gpu-page.mjs --module=tools/gpu/check-forces.mjs && node tools/gpu-page.mjs --module=tools/gpu/check-integrator.mjs && node tools/gpu-page.mjs --module=tools/gpu/check-minimiser.mjs && node tools/gpu-page.mjs --module=tools/gpu/check-barostat.mjs && node tools/gpu-page.mjs --module=tools/gpu/check-analysis.mjs && node tools/gpu-page.mjs --module=tools/gpu/check-displacement.mjs && node tools/gpu-page.mjs --module=tools/gpu/probe-ribbon-shader.mjs",
+    "test:gpu:page": "node tools/gpu-page.mjs --module=tools/gpu/check-bonded.mjs && node tools/gpu-page.mjs --module=tools/gpu/check-fft.mjs && node tools/gpu-page.mjs --module=tools/gpu/check-pme.mjs && node tools/gpu-page.mjs --module=tools/gpu/check-nonbonded.mjs && node tools/gpu-page.mjs --module=tools/gpu/check-forces.mjs && node tools/gpu-page.mjs --module=tools/gpu/check-integrator.mjs && node tools/gpu-page.mjs --module=tools/gpu/check-minimiser.mjs && node tools/gpu-page.mjs --module=tools/gpu/check-barostat.mjs && node tools/gpu-page.mjs --module=tools/gpu/check-analysis.mjs && node tools/gpu-page.mjs --module=tools/gpu/check-displacement.mjs && node tools/gpu-page.mjs --module=tools/gpu/probe-ribbon-shader.mjs && node tools/gpu-page.mjs --module=tools/gpu/check-restraints.mjs",
     "test:gpu:fft": "node tools/gpu-node.mjs tools/gpu/check-fft.mjs",
     "test:gpu:pme": "node tools/gpu-node.mjs tools/gpu/check-pme.mjs",
     "test:gpu:forces": "node tools/gpu-node.mjs tools/gpu/check-forces.mjs",
@@ -29,7 +29,8 @@
     "test:gpu:displacement": "node tools/gpu-node.mjs tools/gpu/check-displacement.mjs",
     "bench:skin": "node tools/gpu-node.mjs tools/gpu/bench-skin.mjs",
     "test:page:view": "node tools/gpu-page.mjs --view=helix --draw=ribbon --shot-of=\"#viewer\" --screenshot=/tmp/rainmd-helix.png && node tools/gpu-page.mjs --view=strand --draw=ribbon --azimuth=-1.954 --elevation=-0.135 --shot-of=\"#viewer\" --screenshot=/tmp/rainmd-strand.png && node tools/gpu-page.mjs --view=mixed --draw=both --azimuth=0.9 --elevation=0.25 --shot-of=\"#viewer\" --screenshot=/tmp/rainmd-mixed.png",
-    "test:gpu:ribbon": "node tools/gpu-node.mjs tools/gpu/probe-ribbon-shader.mjs"
+    "test:gpu:ribbon": "node tools/gpu-node.mjs tools/gpu/probe-ribbon-shader.mjs",
+    "test:gpu:restraints": "node tools/gpu-node.mjs tools/gpu/check-restraints.mjs"
   },
   "optionalDependencies": {
     "webgpu": "0.3.0"

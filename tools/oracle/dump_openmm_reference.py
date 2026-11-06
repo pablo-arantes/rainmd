@@ -67,6 +67,43 @@ def build(prmtop, method, cutoff_nm, constraints, rigid_water, ewald_tol):
     return prmtop.createSystem(**kwargs)
 
 
+def add_restraints(system, positions, force_constant, prmtop):
+    """The notebooks' own restraint, built the notebooks' own way.
+
+    🔴 COPIED FROM THE NOTEBOOK RATHER THAN REIMPLEMENTED, because the point of
+    an oracle is to be independent of the thing it checks. `k*periodicdistance^2`
+    with no half, per-particle k/x0/y0/z0, and the selection pytraj writes as
+    `!(:H*) & !(:WAT) & !(:Na+) & !(:Cl-) & !(:Mg+) & !(:K+)` - which is done
+    here through OpenMM's own topology so this script needs no pytraj.
+
+    Returns the restrained atom indices so the caller can report them.
+    """
+    restrained = []
+    solvent = {"WAT", "HOH", "H2O", "SOL", "TIP", "TP3", "SPC", "T3P",
+               "NA", "NA+", "CL", "CL-", "K", "K+", "MG", "MG2", "CA2", "ZN",
+               "LI", "LI+", "RB", "RB+", "CS", "CS+", "BR", "BR-", "IB", "CIO"}
+    for atom in prmtop.topology.atoms():
+        name = atom.residue.name.strip().upper()
+        if name in solvent:
+            continue
+        if atom.element is not None and atom.element.symbol == "H":
+            continue
+        restrained.append(atom.index)
+    if force_constant <= 0 or not restrained:
+        return []
+    restraint = openmm.CustomExternalForce(
+        "k*periodicdistance(x, y, z, x0, y0, z0)^2;")
+    restraint.addPerParticleParameter("k")
+    restraint.addPerParticleParameter("x0")
+    restraint.addPerParticleParameter("y0")
+    restraint.addPerParticleParameter("z0")
+    for index in restrained:
+        here = positions[index].value_in_unit(unit.nanometer)
+        restraint.addParticle(index, [force_constant, here[0], here[1], here[2]])
+    system.addForce(restraint)
+    return restrained
+
+
 def nonbonded_of(system):
     for force in system.getForces():
         if isinstance(force, openmm.NonbondedForce):
@@ -172,6 +209,16 @@ def main(argv=None):
                         help="force the Ewald splitting parameter, 1/nm")
     parser.add_argument("--pme-grid", default=None,
                         help="force the reciprocal grid, e.g. 24,32,24")
+    parser.add_argument("--displace", type=float, default=None,
+                        help="nm; shift every atom by a deterministic amount "
+                             "AFTER capturing the restraint reference, so the "
+                             "restraint has a non-zero displacement to score. "
+                             "The displaced positions are written into the dump, "
+                             "because a restraint evaluated at its own reference "
+                             "is exactly zero and proves nothing.")
+    parser.add_argument("--restraint-force", type=float, default=None,
+                        help="k in kJ/mol/nm^2 for the notebooks' positional "
+                             "restraint on solute heavy atoms; omitted means none")
     parser.add_argument("--full-forces", action="store_true",
                         help="write every per-atom force component, not just checksums")
     args = parser.parse_args(argv)
@@ -265,10 +312,33 @@ def main(argv=None):
             grid = tuple(parts)
         force.setPMEParameters(alpha, *grid)
 
+    # 🔴 THE REFERENCE IS THE UNDISPLACED STRUCTURE, AND THE DISPLACEMENT COMES
+    # AFTER. A restraint evaluated at its own reference is exactly zero, so the
+    # first version of this dumped a restrained system whose restraint energy
+    # was 0.000000 and whose total matched the unrestrained run to every digit -
+    # a fixture that proved the restraint was wired to nothing.
+    reference_positions = positions
+    restrained = []
+    if args.displace:
+        import math
+        shifted = []
+        for index, point in enumerate(positions.value_in_unit(unit.nanometer)):
+            shifted.append(openmm.Vec3(
+                point[0] + args.displace * math.sin(index * 0.7),
+                point[1] + args.displace * math.cos(index * 1.3),
+                point[2] + args.displace * math.sin(index * 2.1),
+            ) * unit.nanometer)
+        positions = unit.Quantity(shifted)
+
     def run(mutate=None):
+        nonlocal restrained
         system = build(prmtop, args.nonbonded, args.cutoff, args.constraints,
                        rigid_water, args.ewald_tolerance)
         force_pme(system)
+        # Added inside run(), because run() builds a fresh system per arm and a
+        # force added to the outer one would be evaluated by nothing.
+        restrained = add_restraints(system, reference_positions,
+                                    args.restraint_force or 0.0, prmtop)
         if mutate is not None:
             mutate(system)
         return single_point(system, positions, box)
@@ -298,6 +368,10 @@ def main(argv=None):
     system = build(prmtop, args.nonbonded, args.cutoff, args.constraints,
                    rigid_water, args.ewald_tolerance)
     force_pme(system)
+    # 🔴 ADDED AFTER force_pme AND BEFORE ANY CONTEXT EXISTS. A force added to a
+    # system that already has a context is silently ignored by that context, so
+    # the restraint would contribute nothing and the comparison would report
+    # this port's restraint as a pure error.
     constraints = []
     for index in range(system.getNumConstraints()):
         p1, p2, distance = system.getConstraintParameters(index)
@@ -355,6 +429,23 @@ def main(argv=None):
         "exceptionCount": len(exceptions),
         "exceptions": exceptions,
     }
+    # 🔴 THE RESTRAINED ATOM LIST, NOT JUST THE ENERGY. The selection is where
+    # this can go wrong without the number looking wrong: restrain the whole
+    # system instead of the solute and the energy is still a plausible
+    # magnitude. Dumping the indices makes the two selections comparable.
+    payload["restraint"] = {
+        "force": args.restraint_force or 0.0,
+        "atomCount": len(restrained),
+        "atoms": [int(index) for index in restrained],
+        "displace": args.displace or 0.0,
+    }
+    if args.displace:
+        # The evaluated coordinates, so the port scores the same configuration
+        # rather than reproducing the displacement and hoping it matches.
+        payload["positions"] = [
+            float(value) for point in positions.value_in_unit(unit.nanometer)
+            for value in point
+        ]
     if args.full_forces:
         payload["forces"] = {
             "total": total_forces.tolist(),

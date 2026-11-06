@@ -25,8 +25,14 @@ output goes straight into cpptraj, MDAnalysis, VMD or PyMOL alongside the
 `.prmtop` you already have — the DCD writer is byte-compared against OpenMM's
 own.
 
-The whole workflow is on the GPU: **minimise, equilibrate, run NVT or NPT,
-watch it, write it out.** The viewer reads the simulation's own position buffer,
+The whole workflow is on the GPU and follows the notebooks' three stages:
+**minimise** (steps you choose, 10 kJ/mol/nm tolerance), **equilibrate** in NPT
+with the solute's heavy atoms restrained so the water settles around a held
+structure, then **production** in NPT with the restraint off. Durations are in
+nanoseconds, trajectory intervals in picoseconds, and the page tells you what
+each stage will cost at a rate it measures on your own system — because the
+honest answer for a solvated protein is often days, and you should see that
+before you start. The viewer reads the simulation's own position buffer,
 so drawing a frame copies nothing to the host. In NPT at 1 bar it took the test
 system's deliberately underdense tleap box from 0.587 to **0.992 g/cm³** — TIP3P
 water is about 0.98.

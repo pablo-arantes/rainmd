@@ -66,6 +66,11 @@ Re-run them with `npm run check:openmm`, `npm run check:gradients`,
 | **all three colour modes draw** | headless Chrome, each under its own error scope | element / receptor-binder / secondary structure all validate |
 | **a real helix and strand are drawn as such** | two ff14SB fixtures built by tleap with `impose`, photographed in Chrome | 15/15 residues helix (red) and 15/15 sheet (yellow), ACE/NME caps neutral because they carry no alpha carbon; CA spacings 0.521/0.638 and 1.051/1.386 nm |
 | **the structure is drawn on load** | the `--view` lane, which runs nothing | 162 atoms visible from a dropped topology alone — previously a black canvas until Minimise was pressed |
+| **positional restraints** | **OpenMM**, the notebooks' own `CustomExternalForce`, at a displaced structure | host **exactly 0.00e+0**, device 6.7e-7 (f32 on a box-spanning reference); the restrained selection is 10 of 10 atoms, identical to pytraj's `!(:H*) & !(:WAT) & !(:Na+)...` |
+| **a zero force constant is inert** | the same run built with no restraints at all | **bit-identical** potential — which is what separates "the restraint is right" from "the restraint does nothing" |
+| **the restraint pulls towards its reference** | the angle between force and displacement | cosine **−1.0** — `k*d²` is even in `d`, so a sign error leaves every energy comparison exact while pushing the solute away |
+| **the three-stage protocol runs** | headless Chrome, through the page's own buttons | minimise (1000 steps, 10 kJ/mol/nm) → equilibrate (NPT, 33 solute heavy atoms at 500 kJ/mol/nm²) → production; equilibration is locked until minimisation has run |
+| **the restraint visibly holds the solute** | the live four-way RMSD, restrained against free | complex RMSD **0.034 nm restrained against 0.111 free** over the same 4000 steps, binder-on-receptor 0.085 against 0.207 |
 | **the ribbon's frame is a valid frame** | the three structure fixtures, guide by guide | side vectors unit length to 1e-5 and perpendicular to the backbone to **1e-5**; consecutive frames never oppose (min dot +0.62 helix, +0.83 strand) |
 | **the flip correction is what stops a strand twisting** | deleting it | the minimum consecutive dot goes from +0.62 to **−0.75**, i.e. the frame reverses — the one ribbon property a still image of a helix cannot show |
 | **a strand ends in an arrowhead, a helix does not** | the width profile along each chain | strand 0.110 nm → base **0.209** → tip **0.012**; helix constant at 0.120; a coil rod is 0.040, under half a helix's width so structure reads without colour |
@@ -136,6 +141,49 @@ What remains:
 The host reference implements all of these and is validated, so each kernel has
 its oracle waiting before it is written. `shared/pme/parameters.js` already
 restricts grids to sizes the planned FFT can transform.
+
+## What the notebooks do, and what this page now does
+
+The Making-it-rain notebooks run three stages, and until now this page ran one.
+Read out of `Amber.ipynb` rather than assumed:
+
+| | notebook | this page |
+|---|---|---|
+| **1 minimise** | `minimizeEnergy(tolerance=10 kJ/mol/nm, maxIterations=N)`, N from a dropdown of 1000…100000 | the same, same dropdown, same tolerance |
+| **2 equilibrate** | **NPT** with `MonteCarloBarostat`, solute heavy atoms restrained by `CustomExternalForce('k*periodicdistance(...)^2')` at 500 kJ/mol/nm², time in **ns** | the same |
+| **3 production** | NPT, unrestrained, `Stride_Time × Number_of_strides` ns | the same |
+| durations | ns, with trajectory and log intervals in **ps** | the same |
+| timestep | a dropdown, 0.5–4 fs | a field, same default of 2 fs |
+
+🔴 **THE EQUILIBRATION IS NPT, NOT NVT.** The cell adds a `MonteCarloBarostat`
+before the integrator, so the box is free while the solute is held — the
+restraint is what stops the solute moving, not a fixed volume. Implementing it
+as NVT would hold the density at whatever tleap's `solvateBox` guessed, which is
+the thing equilibration exists to fix: the test fixture starts at
+0.587 g/cm³ and TIP3P wants 0.98.
+
+🔴 **AND `k*d²` CARRIES NO HALF.** Every other harmonic term in this port uses
+OpenMM's `½k x²`; the notebooks' restraint does not, so the slider's 500 means a
+force of 1000 kJ/mol/nm at one nanometre. Reading it the other way would make
+every restraint half as stiff as the number says and still produce a trajectory
+that looked fine.
+
+🔴 **THE REFERENCE DOES NOT FOLLOW THE BOX.** OpenMM captures `x0,y0,z0` when
+the force is added and the barostat never rescales them, so a restraint pulls
+towards where the atom was in the box as it was. That looks like an oversight
+and is the behaviour the protocol depends on — references that rode the volume
+changes would let the solute drift with them.
+
+## How long a run actually takes, which the page now says out loud
+
+Durations are in nanoseconds because that is how a protocol is written, and the
+page shows what each stage costs **at a rate measured on the system in front of
+you** (“Time this system” runs 300 steps and reports ms/step). That matters
+because the honest answer is often discouraging: at the measured 2.24 ms/step
+for the 2547-atom two-body fixture, 2 fs steps give about **77 ns/day**, so a
+500 ns production is **roughly 6.5 days of a tab staying open**. A literature
+protocol is not reachable here for a solvated protein, and a reader who types
+500 should see that before pressing the button rather than after.
 
 ## The neighbour-list skin, which was wrong
 

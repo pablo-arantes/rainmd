@@ -11,6 +11,7 @@
  *   node tools/check-against-openmm.mjs
  */
 import { readFileSync } from "node:fs";
+import { buildRestraints } from "../shared/topology/restraints.js";
 import { parsePrmtop } from "../shared/amber/prmtop.js";
 import { parseInpcrd } from "../shared/amber/inpcrd.js";
 import { buildSystem } from "../shared/topology/system.js";
@@ -37,6 +38,19 @@ const CASES = [
     build: { constraints: "HBonds", rigidWater: true, cutoff: 1.0 },
     evaluate: { method: "PME", alpha: 2.6282608939112583, grid: [24, 24, 24] },
   },
+  {
+    // 🔴 THE EQUILIBRATION STAGE'S RESTRAINT, SCORED AT A DISPLACED STRUCTURE.
+    // A positional restraint evaluated at its own reference is exactly zero, so
+    // this case reads the DISPLACED coordinates out of the dump and restrains
+    // them towards the file's own - which is the only configuration in which
+    // the term has a value to compare. The notebooks' convention is `k*d^2`
+    // with no half, and the selection is solute heavy atoms.
+    name: "ala-wat / PME / HBonds / restrained at 500 kJ/mol/nm^2",
+    topology: "ala-wat", reference: "ala-wat-restraint-500.json",
+    build: { constraints: "HBonds", rigidWater: true, cutoff: 1.0 },
+    evaluate: { method: "PME", alpha: 2.6282608939112583, grid: [24, 24, 24] },
+    restrained: true,
+  },
 ];
 
 let failures = 0;
@@ -49,8 +63,22 @@ for (const testCase of CASES) {
     { expectedAtomCount: topology.atomCount },
   );
   const system = buildSystem(topology, { ...testCase.build, box: coordinates.box });
-  const { energy, forces } = potentialEnergy(system, coordinates.positions, testCase.evaluate);
   const reference = JSON.parse(readFileSync(fixture(testCase.reference), "utf8"));
+  // A restrained case evaluates the DUMP's coordinates, restrained towards the
+  // file's, so both sides score one configuration rather than two that are
+  // meant to agree.
+  let evaluateAt = coordinates.positions;
+  let restraints = null;
+  if (testCase.restrained === true) {
+    evaluateAt = Float64Array.from(reference.positions);
+    restraints = buildRestraints({
+      force: reference.restraint.force,
+      atoms: reference.restraint.atoms,
+      reference: coordinates.positions,
+    });
+  }
+  const { energy, forces } = potentialEnergy(system, evaluateAt,
+    { ...testCase.evaluate, restraints });
 
   console.log(`\n=== ${testCase.name} ===`);
   console.log(`    ${topology.atomCount} atoms, ${system.constraints.count} constraints, `
@@ -70,6 +98,17 @@ for (const testCase of CASES) {
   // 🔴 THE BONDED TERMS ARE READ OUT OF THE ORACLE'S FORCE GROUPS BY CLASS
   // NAME, not by index: the order OpenMM puts forces in a system is its
   // business and has changed between versions.
+  if (testCase.restrained === true) {
+    // The selection first: a restraint on the wrong atoms still gives a
+    // plausible energy, so the atom list is compared before the number.
+    const theirAtoms = reference.restraint.atoms;
+    comparisons += 1;
+    const sameSelection = restraints.atoms.length === theirAtoms.length
+      && [...restraints.atoms].every((atom, index) => atom === theirAtoms[index]);
+    if (!sameSelection) failures += 1;
+    console.log(`  ${sameSelection ? "ok  " : "FAIL"} ${"restrained selection".padEnd(22)} `
+      + `${restraints.atoms.length} atoms, openmm ${theirAtoms.length}`);
+  }
   const groups = reference.energy.byForceGroup;
   const groupEnergy = (className) => {
     for (const [key, value] of Object.entries(groups)) {
@@ -81,6 +120,10 @@ for (const testCase of CASES) {
   const angleReference = groupEnergy("HarmonicAngleForce");
   const torsionReference = groupEnergy("PeriodicTorsionForce");
 
+  const restraintReference = groupEnergy("CustomExternalForce");
+  if (restraintReference !== null) {
+    check("position restraint", energy.positionRestraint, restraintReference, 1e-10);
+  }
   if (bondReference !== null) check("harmonic bond", energy.harmonicBond, bondReference, 1e-10);
   if (angleReference !== null) check("harmonic angle", energy.harmonicAngle, angleReference, 1e-10);
   if (torsionReference !== null) {

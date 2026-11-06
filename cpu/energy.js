@@ -7,6 +7,7 @@
  * tests and the GPU comparison both read.
  */
 import { harmonicBondEnergy, harmonicAngleEnergy, periodicTorsionEnergy } from "./forces/bonded.js";
+import { restraintEnergy } from "../shared/topology/restraints.js";
 import { directSpaceEnergy, exceptionEnergy } from "./forces/nonbonded.js";
 import { reciprocalEnergy, ewaldSelfEnergy } from "./forces/pme.js";
 import { pmeParameters } from "../shared/pme/parameters.js";
@@ -26,6 +27,13 @@ export function potentialEnergy(system, positions, options = {}) {
   const forces = new Float64Array(positions.length);
   const terms = {};
 
+  // 🔴 BEFORE THE NONBONDED TERMS, so a restrained minimisation sees the
+  // restraint in its first gradient rather than after a PME pass has already
+  // decided the step.
+  terms.positionRestraint = options.restraints === undefined
+    || options.restraints === null ? 0
+    : restraintEnergy(options.restraints, positions, forces,
+      { boxVectors: system.isPeriodic ? system.boxVectors : null });
   terms.harmonicBond = harmonicBondEnergy(system, positions, forces);
   terms.harmonicAngle = harmonicAngleEnergy(system, positions, forces);
   terms.periodicTorsion = periodicTorsionEnergy(system, positions, forces);
@@ -72,7 +80,12 @@ export function potentialEnergy(system, positions, options = {}) {
   terms.coulomb = terms.coulombDirect + terms.coulombReciprocal
     + terms.coulombSelf + terms.coulombNetCharge;
   terms.bonded = terms.harmonicBond + terms.harmonicAngle + terms.periodicTorsion;
-  terms.total = terms.bonded + terms.lennardJones + terms.coulomb;
+  // 🔴 THE RESTRAINT IS IN THE TOTAL, AND IT IS NOT PART OF `bonded`. OpenMM
+  // adds it as a separate CustomExternalForce, so comparing `bonded` against
+  // the reference's bonded force group has to stay restraint-free or the
+  // per-term comparison that this whole file exists for stops working.
+  terms.total = terms.bonded + terms.lennardJones + terms.coulomb
+    + terms.positionRestraint;
 
   return { energy: terms, forces, pme: parameters };
 }

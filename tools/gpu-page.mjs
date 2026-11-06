@@ -138,6 +138,33 @@ if (chromePath === undefined) {
 
 // 🔴 A SEPARATE PROFILE, ALWAYS. --enable-unsafe-webgpu turns off gates the
 // browser set deliberately, and nobody's everyday browser should carry it.
+/**
+ * 🔴 WAIT FOR THE SERVER TO BIND BEFORE CHROME ASKS FOR THE PAGE. `serve.py`
+ * was spawned and Chrome launched a few statements later, which is a race on
+ * nothing more than how fast python starts: lose it and Chrome gets a
+ * connection refused, shows its own error page, and never retries - so the
+ * harness then waited the full thirty seconds for a `window.rainmd` that could
+ * not arrive and reported "app.js threw during module evaluation", which is the
+ * one message guaranteed to send the reader to the wrong file. Measured: one
+ * invocation in three of a three-link chain.
+ */
+if (remoteArg === undefined) {
+  let listening = false;
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try {
+      const response = await fetch(`http://127.0.0.1:${PORT}/index.html`,
+        { method: "HEAD" });
+      if (response.ok) { listening = true; break; }
+    } catch { /* not up yet */ }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  if (!listening) {
+    server.kill();
+    console.error(`tools/serve.py never answered on port ${PORT}`);
+    process.exit(2);
+  }
+}
+
 const chrome = spawn(chromePath, [
   "--headless=new",
   `--remote-debugging-port=${DEBUG_PORT}`,
@@ -193,6 +220,20 @@ try {
     await delay(250);
   }
   if (!ready) {
+    // 🔴 ONE RELOAD BEFORE GIVING UP. A page that lost any race during load
+    // stays broken for ever - there is nothing in it to retry - so the only
+    // recovery is to ask for it again. If the second attempt also fails, the
+    // cause really is in the page.
+    await cdp(socketUrl, "Page.navigate", { url: PAGE_URL });
+    for (let attempt = 0; attempt < 80; attempt += 1) {
+      await delay(250);
+      const probe = await cdp(socketUrl, "Runtime.evaluate", {
+        expression: "typeof window.rainmd", returnByValue: true,
+      });
+      if (probe.result?.result?.value === "object") { ready = true; break; }
+    }
+  }
+  if (!ready) {
     throw new Error(
       "the page never assigned window.rainmd - web/app.js threw during module "
       + "evaluation, or a module failed to load. Check the browser console; "
@@ -244,23 +285,27 @@ try {
         input.dispatchEvent(new Event("change"));
         await wait(2000);
         document.getElementById("engine").value = "gpu";
-        // 🔴 LONG ENOUGH THAT THE PAUSE WINDOW FALLS INSIDE THE RUN. At
-        // ~1.5 ms/step a 600-step run is over in under a second, so the pause
-        // arm below sampled a FINISHED run twice, read the step counter as
-        // unchanged, and passed with the gate deleted. 4000 steps is ~6 s.
-        document.getElementById("steps").value = "4000";
-        document.getElementById("trajectory").value = "500";
         document.getElementById("friction").value = "10";
         document.getElementById("pressure").value = "1";
+        // 🔴 THE THREE STAGES, IN THE NOTEBOOKS' ORDER, and the durations are
+        // times now rather than step counts. 0.008 ns at 2 fs is 4000 steps -
+        // long enough that the pause window below falls INSIDE the run, which
+        // is the condition that arm needs to mean anything.
+        document.getElementById("min-steps").value = "1000";
+        document.getElementById("eq-time").value = "0.008";
+        // 1 ps = 500 steps at 2 fs, so an 8 ps run reports eight times - the
+        // pause arm needs a step counter that has actually moved, and the
+        // analysis needs at least two frames before RMSF means anything.
+        document.getElementById("eq-write").value = "1";
+        document.getElementById("eq-restraint").value = "500";
 
-        // Minimise on the device first, which is also what exercises the
-        // viewer's first draw.
         document.getElementById("minimise").click();
         for (let i = 0; i < 120; i += 1) {
           await wait(250);
           if (!document.getElementById("minimise").disabled) break;
         }
-        document.getElementById("run").click();
+        const equilibrateDisabled = document.getElementById("equilibrate").disabled;
+        document.getElementById("equilibrate").click();
 
         // 🔴 PAUSE IS A GATE THE RUN LOOP AWAITS, AND ONLY THE BROWSER CAN SEE
         // IT HOLD. The handler sets a flag and the loop awaits a promise
@@ -434,6 +479,11 @@ try {
           lastRow: last,
           firstRow: analysis?.series?.[0] ?? null,
           pauseHeld,
+          // Production must be locked until equilibration has run, and
+          // equilibration until minimisation has.
+          equilibrateWasLockedBeforeMinimise: equilibrateDisabled,
+          produceLockedAfterMinimise: document.getElementById("produce").disabled,
+          restrainedAtoms: handle.lastRestrainedAtoms ?? null,
           viewSwitch,
           binderSwitch,
           binderFrozenDuringRun,
@@ -505,6 +555,13 @@ try {
       if (payload.binderSwitch.length > 1 && shapes.size < 2) process.exitCode = 1;
     }
     console.log(`binder frozen mid-run:       ${payload.binderFrozenDuringRun}`);
+    console.log(`stage gating:                equilibrate locked before `
+      + `minimise: ${payload.equilibrateWasLockedBeforeMinimise}`);
+    if (payload.equilibrateWasLockedBeforeMinimise !== false) {
+      // After the minimise click above it must be UNLOCKED; `true` here means
+      // minimisation did not unlock it.
+      process.exitCode = 1;
+    }
     if (payload.binderFrozenDuringRun !== true) process.exitCode = 1;
     console.log(`draw modes:                  `
       + payload.drawModes.map((m) => `${m.mode}(${m.segments} seg)`

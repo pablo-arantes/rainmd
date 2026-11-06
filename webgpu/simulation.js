@@ -24,6 +24,8 @@ import { encodeNeighbours, NeighbourOverflowError } from "./kernels/neighbours.j
 import { erfc } from "../shared/erf.js";
 import { encodeNonbonded } from "./kernels/nonbonded.js";
 import { encodeDisplacement } from "./kernels/displacement.js";
+import { encodeRestraints } from "./kernels/restraints.js";
+import { buildRestraints } from "../shared/topology/restraints.js";
 import { encodePme } from "./kernels/pme.js";
 import {
   encodeLangevinStep, encodeKineticEnergy, packIntegrator, INTEGRATOR_FLOATS,
@@ -141,6 +143,15 @@ export class GpuSimulation {
     // 🔴 THE SKIN IS DERIVED FROM THE RUN, NOT A CONSTANT - see `skinFor`. The
     // old `?? 0.1` was half what this system needs at 2 fs and a fifth of what
     // it needs at 4 fs, and nothing in the force path could tell.
+    // 🔴 RESTRAINTS BELONG TO THE RUN, NOT TO THE SYSTEM. The equilibration
+    // stage restrains and the production stage does not, over the same
+    // topology, so `buildSystem` is the wrong place for them - the restraint
+    // reference is a configuration, which a topology has no notion of.
+    this.restraints = buildRestraints({
+      force: options.restraintForce ?? 0,
+      atoms: options.restraintAtoms ?? [],
+      reference: options.restraintReference ?? [],
+    });
     this.skin = options.skin ?? skinFor(system, {
       timestep: options.timestep, temperature: options.temperature,
     });
@@ -199,6 +210,22 @@ export class GpuSimulation {
       rebuildOrigin: keep(allocator.allocate("rebuildOrigin", atoms * 12,
         STORAGE | GPUBufferUsage.COPY_DST)),
       displacement: keep(allocator.allocate("displacement", 4, READABLE)),
+      // 🔴 ALLOCATED EVEN WHEN THERE ARE NO RESTRAINTS, at one slot. A zero
+      // length buffer is invalid in WebGPU, and making the whole resource table
+      // conditional would put a branch in every bind group that reads it.
+      restraintAtoms: keep(allocator.upload("restraintAtoms",
+        this.restraints.atoms.length > 0
+          ? Uint32Array.from(this.restraints.atoms) : new Uint32Array(1),
+        STORAGE)),
+      restraintReference: keep(allocator.upload("restraintReference",
+        this.restraints.reference.length > 0
+          ? Float32Array.from(this.restraints.reference) : new Float32Array(3),
+        STORAGE)),
+      restraintEnergies: keep(allocator.allocate("restraintEnergies",
+        Math.max(this.restraints.atoms.length, 1) * 4, READABLE)),
+      restraintSettings: keep(allocator.upload("restraintSettings",
+        Float32Array.from([this.restraints.force, 0, 0, 0]),
+        GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST)),
       forces: keep(allocator.allocate("forces", atoms * 12, READABLE)),
       masses: keep(allocator.upload("masses", Float32Array.from(topology.masses), STORAGE)),
       charges: keep(allocator.upload("charges", Float32Array.from(topology.charges), STORAGE)),
@@ -333,6 +360,7 @@ export class GpuSimulation {
     // Every step, because the maximum over the whole rebuild period is what the
     // skin has to cover, and an atom can move out and back inside one block.
     encodeDisplacement(device, encoder, resources, atomCount);
+    encodeRestraints(device, encoder, resources, this.restraints.atoms.length);
     encodeNonbonded(device, encoder,
       { ...resources, energies: resources.nonbondedEnergies },
       atomCount, this.system.topology.typeCount, this.plan);
@@ -916,6 +944,10 @@ export class GpuSimulation {
       this.partialCount * 4, Float32Array);
     const kineticPartials = await readBuffer(device, allocator, resources.kineticPartials,
       this.kineticPartialCount * 4, Float32Array);
+    const restraintSlots = this.restraints.atoms.length;
+    const restraintEnergies = restraintSlots === 0 ? null
+      : await readBuffer(device, allocator, resources.restraintEnergies,
+        restraintSlots * 4, Float32Array);
 
     let bondedTotal = 0;
     let lennardJones = 0;
@@ -932,7 +964,18 @@ export class GpuSimulation {
 
     const coulomb = coulombDirect + reciprocal + this.selfEnergy.total;
     const dispersion = this.#dispersion();
-    const potential = bondedTotal + lennardJones + dispersion + coulomb;
+    // 🔴 SUMMED ON THE HOST IN f64, over as many slots as there are restrained
+    // atoms. The restrained set is the solute's heavy atoms - 2% of a solvated
+    // box - so this is a few hundred adds at a reporting interval, not a
+    // reduction worth a kernel.
+    let restraintEnergy = 0;
+    if (restraintEnergies !== null) {
+      for (let slot = 0; slot < restraintSlots; slot += 1) {
+        restraintEnergy += restraintEnergies[slot];
+      }
+    }
+    const potential = bondedTotal + lennardJones + dispersion + coulomb
+      + restraintEnergy;
     return {
       step: this.step,
       time: this.step * this.timestep,
@@ -946,6 +989,8 @@ export class GpuSimulation {
       potential,
       kinetic,
       total: potential + kinetic,
+      positionRestraint: restraintEnergy,
+      restrainedAtoms: restraintSlots,
       temperature: (2 * kinetic) / (this.system.degreesOfFreedom * BOLTZMANN),
       volume: this.#volume(),
       boxVectors: Float64Array.from(this.boxVectors),
