@@ -1,7 +1,18 @@
 # RainMD
 
+### → **[Run it: pablo-arantes.github.io/rainmd](https://pablo-arantes.github.io/rainmd/)**
+
 Molecular dynamics that runs **in your browser**, on your own GPU, from the
 AMBER topology you already have. No install, no queue, no upload.
+
+Nothing leaves your machine: the page is static files, the simulation runs on
+your GPU, and the trajectory is written in your browser. There is no server to
+send a structure to. If you have no AMBER files to hand, the page offers the
+systems this repository tests itself against — the solvated alanine dipeptide
+runs a real NPT simulation on arrival.
+
+Needs a browser with WebGPU: Chrome or Edge 113+, or Safari 18+. On Linux,
+Chrome may still need `--enable-unsafe-webgpu`.
 
 The simulation is GPU-resident: forces *and* integration run on the device, and
 nothing in a step reads back to the host. It reproduces OpenMM's energies to
@@ -78,7 +89,7 @@ topology can run a simulation on hardware they already own.
 ## Running it
 
 ```bash
-git clone <this repository> && cd rainmd
+git clone https://github.com/pablo-arantes/rainmd && cd rainmd
 python3 tools/serve.py          # then open http://127.0.0.1:4173/
 ```
 

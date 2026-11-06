@@ -36,8 +36,11 @@ const CHROME_CANDIDATES = [
  * unique among processes that exist at the same time, which is exactly the
  * guarantee a chain needs.
  */
+const remoteArg = process.argv.find((argument) => argument.startsWith("--url="));
 const PORT = 4100 + (process.pid % 500);
 const DEBUG_PORT = 9100 + (process.pid % 500);
+const PAGE_URL = remoteArg === undefined
+  ? `http://127.0.0.1:${PORT}/` : remoteArg.slice("--url=".length);
 const runCheck = process.argv.includes("--check");
 
 /**
@@ -118,7 +121,9 @@ async function cdp(url, method, params = {}) {
   return result;
 }
 
-const server = spawn("python3", ["tools/serve.py", "--port", String(PORT)], { stdio: "ignore" });
+const server = remoteArg === undefined
+  ? spawn("python3", ["tools/serve.py", "--port", String(PORT)], { stdio: "ignore" })
+  : { kill() {} };
 // 🔴 `require` DOES NOT EXIST IN AN ES MODULE, and the catch swallowed the
 // ReferenceError into "no Chrome found" - a probe reporting the absence of the
 // thing it failed to look for. statSync is imported at the top instead.
@@ -145,7 +150,12 @@ const chrome = spawn(chromePath, [
   "--no-first-run",
   "--disable-gpu-sandbox",
   "--window-size=1200,2400",
-  `http://127.0.0.1:${PORT}/`,
+  // 🔴 `--url=` POINTS THIS AT A DEPLOYED PAGE, which is the only way to check
+  // the thing a visitor actually gets. Everything else here is served by
+  // tools/serve.py from the working tree, so it validates the code on disk and
+  // says nothing about what was published - a missing file, a wrong MIME type
+  // or a path that only resolves at the server root are all invisible locally.
+  PAGE_URL,
 ], { stdio: "ignore" });
 
 try {
@@ -156,7 +166,10 @@ try {
     try {
       const response = await fetch(`http://127.0.0.1:${DEBUG_PORT}/json`);
       const list = await response.json();
-      targets = list.filter((target) => target.type === "page" && target.url.includes(String(PORT)));
+      // Match the page we asked for, not the port - a remote URL has no port.
+      const wanted = remoteArg === undefined ? String(PORT) : new URL(PAGE_URL).host;
+      targets = list.filter((target) => target.type === "page"
+        && target.url.includes(wanted));
       if (targets.length > 0) break;
     } catch { /* not up yet */ }
   }
@@ -213,10 +226,15 @@ try {
     // directly. Every bug this check has ever found was in a handler.
     const simulateExpression = `(async () => {
         const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+        // 🔴 RELATIVE, SO THIS LANE WORKS AGAINST A DEPLOYED PAGE TOO. A
+        // leading slash resolves to the server root, which is the repository on
+        // the dev server and the ACCOUNT root on a GitHub Pages project site -
+        // so an absolute path passes locally and 404s on the only deployment
+        // anyone will visit.
         const fixture = "FIXTURE_NAME";
         const [top, crd] = await Promise.all([
-          fetch("/test/fixtures/" + fixture + ".prmtop").then((r) => r.text()),
-          fetch("/test/fixtures/" + fixture + ".inpcrd").then((r) => r.text()),
+          fetch("test/fixtures/" + fixture + ".prmtop").then((r) => r.text()),
+          fetch("test/fixtures/" + fixture + ".inpcrd").then((r) => r.text()),
         ]);
         const files = new DataTransfer();
         files.items.add(new File([top], fixture + ".prmtop"));
@@ -543,8 +561,8 @@ try {
         const wait = (ms) => new Promise((r) => setTimeout(r, ms));
         const fixture = "FIXTURE_NAME";
         const [top, crd] = await Promise.all([
-          fetch("/test/fixtures/" + fixture + ".prmtop").then((r) => r.text()),
-          fetch("/test/fixtures/" + fixture + ".inpcrd").then((r) => r.text()),
+          fetch("test/fixtures/" + fixture + ".prmtop").then((r) => r.text()),
+          fetch("test/fixtures/" + fixture + ".inpcrd").then((r) => r.text()),
         ]);
         const files = new DataTransfer();
         files.items.add(new File([top], fixture + ".prmtop"));
@@ -696,8 +714,8 @@ try {
         const input = document.getElementById("file-input");
         const fixture = "FIXTURE_NAME";
         const [top, crd] = await Promise.all([
-          fetch("/test/fixtures/" + fixture + ".prmtop").then((r) => r.text()),
-          fetch("/test/fixtures/" + fixture + ".inpcrd").then((r) => r.text()),
+          fetch("test/fixtures/" + fixture + ".prmtop").then((r) => r.text()),
+          fetch("test/fixtures/" + fixture + ".inpcrd").then((r) => r.text()),
         ]);
         const files = new DataTransfer();
         files.items.add(new File([top], fixture + ".prmtop"));
