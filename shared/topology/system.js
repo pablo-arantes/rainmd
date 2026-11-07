@@ -30,6 +30,9 @@ const WATER_RESIDUES = new Set(["WAT", "HOH", "H2O", "SOL", "TIP", "TP3", "SPC"]
  * @param {"none"|"HBonds"|"AllBonds"} [options.constraints]
  * @param {boolean} [options.rigidWater]
  * @param {number} [options.cutoff] nm
+ * @param {ArrayLike<number>} [options.boxVectors] nine floats, reduced upper
+ *   triangular. Overrides `box`; this is how a stage hands its equilibrated
+ *   volume to the next one.
  * @param {{lengths: number[], angles: number[]}} [options.box] from the inpcrd,
  *   which overrides the topology's own - the coordinate file is written later
  *   and a restart's box is the current one.
@@ -48,8 +51,17 @@ export function buildSystem(topology, options = {}) {
   const cutoff = options.cutoff ?? 1.0;
 
   const boxSource = options.box ?? topology.boxFromTopology;
-  const boxVectors = boxSource === null || boxSource === undefined
-    ? null : boxVectorsFromLengthsAndAngles(boxSource);
+  // 🔴 `boxVectors` OVERRIDES `box`, BECAUSE A LATER STAGE HAS A DIFFERENT BOX.
+  // An NPT equilibration exists to fix the density, so the volume it finishes
+  // with is the only correct input for production - rebuilding from the
+  // coordinate file's box throws that away and starts production at whatever
+  // `solvateBox` originally guessed. The vectors are the stage handoff's
+  // currency because that is what the barostat produces; `box` stays for the
+  // lengths-and-angles form a coordinate file carries.
+  const boxVectors = options.boxVectors !== undefined && options.boxVectors !== null
+    ? Float64Array.from(options.boxVectors)
+    : (boxSource === null || boxSource === undefined
+      ? null : boxVectorsFromLengthsAndAngles(boxSource));
   if (topology.isPeriodic && boxVectors === null) {
     throw new Error(
       "topology declares a periodic box (IFBOX > 0) but no box vectors were "

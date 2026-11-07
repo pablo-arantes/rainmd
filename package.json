@@ -30,7 +30,10 @@
     "bench:skin": "node tools/gpu-node.mjs tools/gpu/bench-skin.mjs",
     "test:page:view": "node tools/gpu-page.mjs --view=helix --draw=ribbon --shot-of=\"#viewer\" --screenshot=/tmp/rainmd-helix.png && node tools/gpu-page.mjs --view=strand --draw=ribbon --azimuth=-1.954 --elevation=-0.135 --shot-of=\"#viewer\" --screenshot=/tmp/rainmd-strand.png && node tools/gpu-page.mjs --view=mixed --draw=both --azimuth=0.9 --elevation=0.25 --shot-of=\"#viewer\" --screenshot=/tmp/rainmd-mixed.png",
     "test:gpu:ribbon": "node tools/gpu-node.mjs tools/gpu/probe-ribbon-shader.mjs",
-    "test:gpu:restraints": "node tools/gpu-node.mjs tools/gpu/check-restraints.mjs"
+    "test:gpu:restraints": "node tools/gpu-node.mjs tools/gpu/check-restraints.mjs",
+    "test:page:handoff": "node tools/gpu-page.mjs --handoff",
+    "test:page:layout": "node tools/gpu-page.mjs --layout --width=1440 --shot-of=\"body\" --screenshot=/tmp/rainmd-layout-wide.png && node tools/gpu-page.mjs --layout --width=430 --shot-of=\"body\" --screenshot=/tmp/rainmd-layout-narrow.png",
+    "test:page:examples": "node tools/gpu-page.mjs --examples"
   },
   "optionalDependencies": {
     "webgpu": "0.3.0"

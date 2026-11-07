@@ -270,6 +270,53 @@ async function loadFiles(files) {
 // ---------------------------------------------------------------- system ----
 function numberOf(id) { return Number(element(id).value); }
 
+/**
+ * The box the NEXT stage must use.
+ *
+ * 🔴 NOT THE COORDINATE FILE'S, ONCE A BAROSTAT HAS RUN. Every box reference on
+ * this page used to read `loaded.coordinates.box`, which is what tleap's
+ * `solvateBox` guessed - so production rebuilt the system in the ORIGINAL
+ * volume and discarded the density the NPT equilibration had just established.
+ * On the test fixture that is 0.587 g/cm^3 against the 0.98 water wants: the
+ * equilibration worked, reported the right density, and then production threw
+ * it away. Reported by a reader, not by a gate.
+ */
+/**
+ * Lengths and angles from box vectors, for a writer that wants the other form.
+ *
+ * 🔴 THE RESTART FILE CARRIES LENGTHS AND ANGLES, NOT VECTORS, so an NPT box
+ * has to be converted back or the .rst7 reports the volume the run STARTED in.
+ * The vectors are reduced upper triangular, which makes this the standard
+ * inverse: |a|, |b|, |c| and the three angles between them.
+ */
+function boxFromVectors(vectors) {
+  if (vectors === null || vectors === undefined || vectors.length < 9) return null;
+  const a = [vectors[0], vectors[1], vectors[2]];
+  const b = [vectors[3], vectors[4], vectors[5]];
+  const c = [vectors[6], vectors[7], vectors[8]];
+  const norm = (v) => Math.hypot(v[0], v[1], v[2]);
+  const dot = (u, v) => u[0] * v[0] + u[1] * v[1] + u[2] * v[2];
+  const degrees = (value) => (Math.acos(Math.max(-1, Math.min(1, value))) * 180) / Math.PI;
+  const la = norm(a);
+  const lb = norm(b);
+  const lc = norm(c);
+  return {
+    lengths: [la, lb, lc],
+    angles: [degrees(dot(b, c) / (lb * lc)),
+      degrees(dot(a, c) / (la * lc)),
+      degrees(dot(a, b) / (la * lb))],
+  };
+}
+
+function currentBoxVectors() {
+  return hostState?.boxVectors ?? null;
+}
+
+/** The current box in lengths-and-angles form, for anything that writes one. */
+function currentBox() {
+  return boxFromVectors(currentBoxVectors()) ?? loaded?.coordinates.box ?? null;
+}
+
 function assembleSystem() {
   const method = element("method").value;
   const system = buildSystem(loaded.topology, {
@@ -277,6 +324,7 @@ function assembleSystem() {
     rigidWater: true,
     cutoff: method === "NoCutoff" ? 0 : numberOf("cutoff"),
     box: loaded.coordinates.box,
+    boxVectors: currentBoxVectors(),
   });
   return { system, method };
 }
@@ -354,7 +402,7 @@ function viewerPdb(preset) {
   const positions = lastPositions ?? hostState?.positions
     ?? loaded.coordinates.positions;
   return writePdb({ topology: loaded.topology, boxVectors: selectionSystem?.boxVectors ?? null },
-    positions, { indices, box: loaded.coordinates.box });
+    positions, { indices, box: currentBox() });
 }
 
 /**
@@ -599,11 +647,16 @@ element("minimise").addEventListener("click", async () => {
         const state = await simulation.readState();
         // 🔴 NULL, NOT A ZERO ARRAY - SEE `startState`. A minimised state has
         // no velocities; recording that as zeros made it a valid draw at 0 K.
-        hostState = { positions: Float64Array.from(state.positions),
-          velocities: null, step: 0 };
-        if (viewer !== null) {
-
-        }
+        // Velocities stay null - minimisation destroys them, see `startState`
+        // - but the box carries, so a second minimisation after an NPT stage
+        // does not revert the volume.
+        hostState = {
+          positions: Float64Array.from(state.positions),
+          velocities: null,
+          boxVectors: Float64Array.from(state.boxVectors),
+          step: 0,
+        };
+        lastPositions = hostState.positions;
       } finally {
         simulation.release();
       }
@@ -671,7 +724,7 @@ function applyView(view, system, positions) {
   const indices = visibleIndices(preset);
   const pdb = writePdb({ topology: system.topology,
     boxVectors: selectionSystem?.boxVectors ?? null },
-    positions, { indices, box: loaded.coordinates.box });
+    positions, { indices, box: currentBox() });
   view.setStructure(pdb, { colourBy, representation });
   const shown = indices === null ? system.topology.atomCount : indices.length;
   element("view-counts").textContent =
@@ -1091,9 +1144,29 @@ async function runOnDevice(stageConfig = {}) {
     log(`  device memory: peak ${(after.allocator.peakBytes / 2 ** 20).toFixed(1)} MiB`);
 
     const state = await simulation.readState();
-    finalState = { positions: state.positions, velocities: state.velocities,
-      time: simulation.step * options.timestep, box: loaded.coordinates.box };
+    // 🔴 THE STAGE HANDS ON ITS WHOLE STATE, WHICH IT DID NOT BEFORE. This set
+    // `finalState` - used only by the .rst7 download - and left `hostState`
+    // alone, so the next stage read the structure from BEFORE this one. A
+    // production run therefore restarted from the minimised structure and
+    // threw the entire equilibration away, silently: the trajectory looked
+    // fine, the energies looked fine, and the solvent had never relaxed.
+    // Positions, velocities AND the box, because a barostat changes all three.
+    hostState = {
+      positions: Float64Array.from(state.positions),
+      velocities: Float64Array.from(state.velocities),
+      boxVectors: Float64Array.from(state.boxVectors),
+      step: simulation.step,
+    };
+    lastPositions = hostState.positions;
+    finalState = {
+      positions: state.positions,
+      velocities: state.velocities,
+      time: simulation.step * options.timestep,
+      box: boxFromVectors(state.boxVectors),
+    };
     element("download-state").disabled = false;
+    log(`  carried forward: ${state.volume.toFixed(3)} nm³ box, `
+      + `${hostState.positions.length / 3} positions and their velocities`);
     if (writer !== null && writer.frameCount > 0) {
       trajectory = writer.finish();
       element("download-dcd").disabled = false;
@@ -1140,7 +1213,8 @@ async function runOnHost(stageConfig = {}) {
   const elapsed = (performance.now() - began) / 1000;
   log(`  ${steps} steps in ${elapsed.toFixed(1)} s — ${((elapsed / steps) * 1000).toFixed(0)} ms/step`);
   finalState = { positions: hostState.positions, velocities: hostState.velocities,
-    time: hostState.step * options.timestep, box: loaded.coordinates.box };
+    time: hostState.step * options.timestep,
+    box: boxFromVectors(currentBoxVectors()) ?? loaded.coordinates.box };
   element("download-state").disabled = false;
 }
 
@@ -1228,7 +1302,7 @@ element("download-pdb").addEventListener("click", () => {
     ?? loaded.coordinates.positions;
   const text = writePdb({ topology: loaded.topology }, positions, {
     indices,
-    box: loaded.coordinates.box,
+    box: currentBox(),
     remarks: [
       `RainMD ${loaded.name}`,
       `view ${preset.label}: ${indices === null ? loaded.topology.atomCount : indices.length}`
@@ -1271,5 +1345,7 @@ window.rainmd = {
   get loaded() { return loaded; },
   get trajectoryBytes() { return trajectory === null ? 0 : trajectory.length; },
   get selections() { return selections; },
+  // The stage handoff is only checkable from outside if the state is reachable.
+  get hostState() { return hostState; },
   get analysis() { return analysis; },
 };

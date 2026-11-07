@@ -814,6 +814,113 @@ try {
     await screenshot(socketUrl);
   }
 
+  /**
+   * 🔴 THE STAGE HANDOFF, WHICH NOTHING CHECKED AND WHICH WAS BROKEN. It is not
+   * visible in any energy, any force or any trajectory: a production run that
+   * silently restarts from the minimised structure produces a perfectly valid
+   * trajectory of the wrong starting point. The only way to see it is to record
+   * the structure and the box at each stage boundary and compare them.
+   */
+  if (process.argv.includes("--handoff")) {
+    const expression = `(async () => {
+        const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+        const idle = async (id, tries) => {
+          for (let i = 0; i < tries; i += 1) {
+            await wait(250);
+            if (!document.getElementById(id).disabled) return true;
+          }
+          return false;
+        };
+        const [top, crd] = await Promise.all([
+          fetch("test/fixtures/ala-wat.prmtop").then((r) => r.text()),
+          fetch("test/fixtures/ala-wat.inpcrd").then((r) => r.text()),
+        ]);
+        const files = new DataTransfer();
+        files.items.add(new File([top], "ala-wat.prmtop"));
+        files.items.add(new File([crd], "ala-wat.inpcrd"));
+        const input = document.getElementById("file-input");
+        input.files = files.files;
+        input.dispatchEvent(new Event("change"));
+        await wait(1500);
+        const snap = () => {
+          const state = window.rainmd.hostState;
+          if (state === null || state === undefined) return null;
+          const p = state.positions;
+          let checksum = 0;
+          for (let i = 0; i < p.length; i += 1) checksum += p[i] * (i % 97 + 1);
+          const b = state.boxVectors ?? null;
+          return {
+            checksum: Number(checksum.toFixed(6)),
+            volume: b === null ? null : Number((b[0] * b[4] * b[8]).toFixed(4)),
+            hasVelocities: state.velocities !== null && state.velocities !== undefined,
+          };
+        };
+        const loadedSnap = snap();
+        document.getElementById("engine").value = "gpu";
+        document.getElementById("pressure").value = "1";
+        document.getElementById("min-steps").value = "1000";
+        document.getElementById("eq-time").value = "0.01";
+        document.getElementById("eq-write").value = "1";
+        document.getElementById("eq-restraint").value = "500";
+        document.getElementById("prod-time").value = "0.01";
+        document.getElementById("prod-write").value = "1";
+
+        document.getElementById("minimise").click();
+        await idle("minimise", 240);
+        const afterMin = snap();
+        document.getElementById("equilibrate").click();
+        await idle("equilibrate", 480);
+        const afterEq = snap();
+        document.getElementById("produce").click();
+        await idle("produce", 480);
+        const afterProd = snap();
+        return JSON.stringify({ loadedSnap, afterMin, afterEq, afterProd,
+          log: document.getElementById("log").textContent });
+      })()`;
+    const evaluation = await cdp(socketUrl, "Runtime.evaluate", {
+      expression, awaitPromise: true, returnByValue: true,
+    });
+    const payload = JSON.parse(cdpValue(evaluation, "--handoff"));
+    const stages = [["loaded", payload.loadedSnap], ["after minimise", payload.afterMin],
+      ["after equilibrate", payload.afterEq], ["after production", payload.afterProd]];
+    console.log("\nstage handoff - the structure each stage left behind:");
+    for (const [label, snap] of stages) {
+      console.log(`  ${label.padEnd(18)} ${snap === null ? "(no state)"
+        : `checksum ${String(snap.checksum).padStart(16)}  volume ${snap.volume} nm³  `
+          + `velocities ${snap.hasVelocities}`}`);
+    }
+    const min = payload.afterMin;
+    const eq = payload.afterEq;
+    const prod = payload.afterProd;
+    let bad = 0;
+    if (min === null || eq === null || prod === null) { bad += 1; }
+    else {
+      // Each stage must have MOVED the structure it was handed.
+      if (eq.checksum === min.checksum) {
+        console.log("  FAILED: equilibration left the minimised structure unchanged");
+        bad += 1;
+      }
+      if (prod.checksum === eq.checksum) {
+        console.log("  FAILED: production left the equilibrated structure unchanged - "
+          + "it did not start from it");
+        bad += 1;
+      }
+      // Velocities must survive a dynamics stage, or production restarts cold.
+      if (!eq.hasVelocities || !prod.hasVelocities) {
+        console.log("  FAILED: a dynamics stage handed on no velocities");
+        bad += 1;
+      }
+      // And the NPT box must be carried, not reverted to the file's.
+      if (eq.volume === null || prod.volume === null) {
+        console.log("  FAILED: no box was carried"); bad += 1;
+      } else if (prod.volume === min.volume) {
+        console.log("  NOTE: the volume did not change over these short stages");
+      }
+    }
+    if (bad > 0) process.exitCode = 1;
+    else console.log("  every stage started from the one before it");
+  }
+
   const moduleArg = process.argv.find((argument) => argument.startsWith("--module="));
   if (moduleArg !== undefined) {
     // 🔴 THE SAME CHECK MODULE AS THE NODE LANE, IMPORTED BY THE PAGE. Its

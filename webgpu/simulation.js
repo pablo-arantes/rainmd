@@ -1018,6 +1018,13 @@ export class GpuSimulation {
         this.resources.velocities, bytes, Float32Array),
       forces: await readBuffer(this.device, this.allocator,
         this.resources.forces, bytes, Float32Array),
+      // 🔴 THE BOX IS PART OF THE STATE. A barostat changes it, so a caller
+      // that reads positions and velocities and not the box has two thirds of
+      // what it needs to continue - and will silently continue in the volume
+      // the run STARTED from. OpenMM serialises all three into its .rst for
+      // exactly this reason.
+      boxVectors: Float64Array.from(this.boxVectors),
+      volume: this.#volume(),
     };
   }
 

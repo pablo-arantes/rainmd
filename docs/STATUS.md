@@ -142,6 +142,45 @@ The host reference implements all of these and is validated, so each kernel has
 its oracle waiting before it is written. `shared/pme/parameters.js` already
 restricts grids to sizes the planned FFT can transform.
 
+## The stage handoff, which was broken
+
+**Every stage restarted from the minimised structure.** The device run wrote its
+final state into `finalState` — read only by the `.rst7` download button — and
+left `hostState` untouched. So equilibration started from the minimised
+structure correctly, and then production started from the minimised structure
+*again*, discarding the entire equilibration. Found by a reader; no gate could
+see it.
+
+🔴 **AND NOTHING IN THE OUTPUT WOULD SHOW IT.** A production run that silently
+restarts from the wrong structure still produces a valid trajectory, plausible
+energies and a sensible RMSD — of the wrong starting point. Every force and
+energy comparison in this document was correct throughout.
+
+**Three things were being dropped, not one:**
+
+| | before | after |
+|---|---|---|
+| positions | production re-read the minimised structure | each stage hands on what it finished with |
+| velocities | re-drawn from Maxwell-Boltzmann each stage | carried, so production continues rather than restarting cold |
+| **the box** | every reference read the *coordinate file's* box | carried, because NPT changes it |
+
+The box was the worst of the three. An NPT equilibration exists to fix the
+density, and `assembleSystem` rebuilt the system from `loaded.coordinates.box`
+— whatever tleap's `solvateBox` originally guessed. Measured on the solvated
+fixture, the volume now carries **20.52 → 14.39 → 11.96 nm³** across
+minimise → equilibrate → production as the barostat compresses the deliberately
+underdense starting box; before the fix it stayed at 20.52 for all three.
+
+`readState()` did not even return the box, so there was nothing to carry.
+`buildSystem` now takes `boxVectors` which overrides the file's `box`, and that
+is the currency of the handoff because it is what the barostat produces.
+
+**`npm run test:page:handoff`** records the structure checksum, the volume and
+whether velocities exist at each stage boundary and asserts each stage moved
+what it was handed. Falsified by removing the write-back, which reproduces the
+original symptom exactly: checksum 240922.57967 and volume 20.5203 nm³ at all
+three boundaries, with no velocities.
+
 ## What the notebooks do, and what this page now does
 
 The Making-it-rain notebooks run three stages, and until now this page ran one.
