@@ -71,6 +71,10 @@ Re-run them with `npm run check:openmm`, `npm run check:gradients`,
 | **the restraint pulls towards its reference** | the angle between force and displacement | cosine **−1.0** — `k*d²` is even in `d`, so a sign error leaves every energy comparison exact while pushing the solute away |
 | **the three-stage protocol runs** | headless Chrome, through the page's own buttons | minimise (1000 steps, 10 kJ/mol/nm) → equilibrate (NPT, 33 solute heavy atoms at 500 kJ/mol/nm²) → production; equilibration is locked until minimisation has run |
 | **the restraint visibly holds the solute** | the live four-way RMSD, restrained against free | complex RMSD **0.034 nm restrained against 0.111 free** over the same 4000 steps, binder-on-receptor 0.085 against 0.207 |
+| **Mol\* draws the structure** | the three structure fixtures, photographed in Chrome | secondary-structure colouring from Mol\*'s own assignment; a chain too short to trace falls back to ball-and-stick, which is why a capped tripeptide has no ribbon |
+| **every representation and colour mode still works after a run** | headless Chrome, after 4000 NPT steps | cartoon / cartoon+sticks / atoms and structure / chain / element all build, with the atom count checked each time |
+| **the LogMD payload matches their client's** | `logmd/logmd.py`'s `upload_worker_process`, read as source | the same seven keys, `frame_num` as a string, `user_id` pinned to `"public"` and `token` to `null` — a page must never send an account |
+| **a failed share says which frame and why** | an injected `fetch`, so no test touches the network | 404 and a thrown `fetch` both reported with the frame index; the opaque-failure message names CORS *and* a dead endpoint, because a browser cannot tell them apart |
 | **the interface follows LocalFold's** | screenshots at 1440 px and 500 px, through the page's own controls | two columns with a tabbed result pane, white cards, capitalised field labels in bordered groups, one filled primary action; single column below 64rem with the structure first; no horizontal scroll at either width |
 | **the ribbon's frame is a valid frame** | the three structure fixtures, guide by guide | side vectors unit length to 1e-5 and perpendicular to the backbone to **1e-5**; consecutive frames never oppose (min dot +0.62 helix, +0.83 strand) |
 | **the flip correction is what stops a strand twisting** | deleting it | the minimum consecutive dot goes from +0.62 to **−0.75**, i.e. the frame reverses — the one ribbon property a still image of a helix cannot show |
@@ -130,13 +134,22 @@ line here is deleted when it comes good, never widened.
 
 What remains:
 
-1. **`web/viewer.js` and `shared/analysis/ribbon.js` are retained but the page
+1. **LogMD's upload endpoint returns 404, so the share cannot be verified
+   against a live service.** Measured 2026-11-07 from a server, where CORS does
+   not apply: `upload-frame`, `upload-frame-bcif` and `list-project` all answer
+   `404 modal-http: invalid function call`, and those are the URLs in the
+   published logmd 0.1.46, not stale ones from a clone. The payload shape is
+   gated against their source and both failure paths are tested with an
+   injected fetch; what cannot be tested is a successful upload. The fallback —
+   the same frames as a downloadable bundle plus the Python to post them — is
+   the half that does not depend on anyone else's infrastructure.
+2. **`web/viewer.js` and `shared/analysis/ribbon.js` are retained but the page
    no longer loads them.** The WGSL sphere-impostor and cartoon renderer is
    still gated — its tests and the `probe-ribbon-shader` lane still run — but
    3Dmol draws the page now. Keeping an unloaded renderer is exactly the trap
    LocalFold's own notes warn about, so this is a decision waiting to be taken
    rather than a state to settle into: either it finds a use or it goes.
-2. **Performance work, which has barely begun.** One measurement so far: a stall
+3. **Performance work, which has barely begun.** One measurement so far: a stall
    break in SHAKE took a step from 2.40 ms to 1.03 ms, because a tolerance below
    the f32 floor made every cluster run its full iteration cap. Remaining
    candidates are unprofiled: the per-cell insertion sort, the
@@ -230,6 +243,29 @@ for the 2547-atom two-body fixture, 2 fs steps give about **77 ns/day**, so a
 500 ns production is **roughly 6.5 days of a tab staying open**. A literature
 protocol is not reachable here for a solvated protein, and a reader who types
 500 should see that before pressing the button rather than after.
+
+## What the viewer costs now
+
+Mol\* replaced 3Dmol on a deliberate trade, and the numbers are here so the
+decision can be reversed by someone who disagrees with it:
+
+| | raw | gzipped |
+|---|---|---|
+| 3Dmol (removed) | 512 KiB | 149 KiB |
+| **Mol\* 5.13.1 + css** | **5217 KiB** | **1486 KiB** |
+| everything else that ships — parser, force field, PME, integrator, barostat, analysis, page | 461 KiB | 174 KiB |
+
+So the viewer is now about **nine times the program it is a viewer for**, and a
+first visit went from roughly 310 KiB to 1.66 MiB gzipped. It buys Mol\*'s
+cartoon, its own secondary-structure assignment and its lighting. Both are MIT
+and both were vendored rather than fetched from a CDN, so the page still works
+with no network and still sends no request when it opens.
+
+🔴 **AND A FRAME UPDATE IS NOW A RELOAD, WHICH 3Dmol DID BETTER.** 3Dmol exposes
+`model.atoms` as a plain mutable array, so an animation frame was three writes
+per atom. Mol\* holds coordinates in an immutable state tree, so the honest
+implementation is clear-and-load. That is the one thing that got worse, and it
+is why the live animation stays opt-in.
 
 ## The neighbour-list skin, which was wrong
 

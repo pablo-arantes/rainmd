@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>RainMD</title>
+<link rel="stylesheet" href="web/vendor/molstar.css">
 <link rel="stylesheet" href="web/rainmd.css">
 </head>
 <body>
@@ -142,9 +143,9 @@
       </div>
       <div class="tab-body" data-body="structure">
         <div id="viewer" class="viewer"></div>
-        <p class="hint">Drag to rotate, scroll to zoom. 3Dmol's Richardson
-        cartoon with its own secondary-structure assignment — shown as loaded,
-        after minimisation and at the end of each stage.</p>
+        <p class="hint">Drag to rotate, scroll to zoom. Mol*'s cartoon with its own
+        secondary-structure assignment — shown as loaded, after minimisation and
+        at the end of each stage, or every frame if you ask for it.</p>
       </div>
       <div class="tab-body" data-body="analysis" hidden>
         <div class="panels" id="panels" hidden>
@@ -212,6 +213,25 @@
         </div>
       </section>
 
+      <!-- 🔴 ITS OWN CARD, AND THE WARNING IS NOT IN A TOOLTIP. Everything else
+           on this page is local; this is the one button that sends a structure
+           to someone else's server, and that has to be readable before it is
+           pressed rather than after. -->
+      <section class="card">
+        <span class="card-title">Share</span>
+        <div class="buttons">
+          <button id="share-logmd" class="btn btn-quiet" type="button" disabled>Share to LogMD</button>
+        </div>
+        <p class="hint"><strong>This one leaves your machine.</strong> It uploads
+        the trajectory's frames to <a href="https://github.com/log-md/logmd">LogMD</a>,
+        a third-party service, as an anonymous public run — no account, no
+        e-mail. Anyone with the link can see it. Nothing else on this page makes
+        a network request.</p>
+        <p class="hint">Their upload endpoint was returning <code>404</code> when
+        this was written, so the share may fail; if it does you get the frames in
+        LogMD's own format to upload with their Python client instead.</p>
+      </section>
+
       <section class="card" id="status-panel">
         <span class="card-title">This machine</span>
         <dl id="device-report"><dt>WebGPU</dt><dd>checking…</dd></dl>
@@ -236,13 +256,17 @@
     in a step reads back to the browser. Measured on a 1190-atom test system:
     <strong>0.8&nbsp;ms per step, about 215&nbsp;ns/day</strong> in NVT, with an
     energy drift of 0.30&nbsp;kJ/mol per ns per atom over 20&nbsp;ps.</p>
-    <p>The structure is drawn by <a href="https://3dmol.org/">3Dmol.js</a>,
-    vendored under its BSD-3 licence so the page needs no network — the same
-    renderer, and the same Richardson cartoon, that LocalFold uses. It appears as
-    loaded, after minimisation and at the end of each stage rather than animated,
-    because nobody watches a multi-hour production run; the motion is in the
-    <code>.dcd</code>. Secondary structure is 3Dmol's own assignment from the
-    coordinates.</p>
+    <p>The structure is drawn by <a href="https://molstar.org/">Mol*</a>, RCSB's
+    own renderer, vendored under its MIT licence so the page needs no network and
+    sends no request when you open it. It costs 1.47&nbsp;MB gzipped against
+    149&nbsp;KB for the 3Dmol build it replaced, and against 159&nbsp;KB for all
+    of the rest of this program — a deliberate trade for the quality of the
+    drawing. Secondary structure is Mol*'s own assignment from the coordinates;
+    a chain too short to trace is drawn as ball-and-stick instead, which is why
+    a capped tripeptide has no ribbon. The structure appears as loaded, after
+    minimisation and at the end of each stage, or every frame if you set
+    <em>While running</em> to animate — off by default because drawing every
+    report was measured at 17% of a run.</p>
     <p><strong>Frames are wrapped into the box as they are written</strong>,
     whole molecules at a time and on their centroids, which is what OpenMM's own
     <code>DCDReporter</code> does. The running state is never wrapped: the bonded
@@ -276,7 +300,7 @@
      global; a module is deferred by definition, so by the time app.js runs this
      has executed and `window.$3Dmol` exists. Vendored rather than fetched from
      a CDN so the page works with no network and sends no request on open. -->
-<script src="web/vendor/3Dmol-min.js"></script>
+<script src="web/vendor/molstar.js"></script>
 <script type="module" src="web/app.js"></script>
 </body>
 </html>

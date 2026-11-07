@@ -1,0 +1,77 @@
+<!doctype html><html><head><meta charset="utf-8">
+<link rel="stylesheet" href="/web/vendor/molstar.css">
+<style>html,body{margin:0}#v{position:relative;width:900px;height:520px}</style>
+</head><body>
+<div id="v"></div>
+<script src="/web/vendor/molstar.js"></script>
+<script>
+window.probe = (async () => {
+  const out = { stage: "start" };
+  try {
+    out.hasGlobal = typeof molstar;
+    out.viewerKeys = Object.keys(molstar).slice(0, 25);
+    const viewer = await molstar.Viewer.create(document.getElementById("v"), {
+      layoutIsExpanded: false, layoutShowControls: false, layoutShowSequence: false,
+      layoutShowLog: false, layoutShowLeftPanel: false, viewportShowExpand: false,
+      viewportShowSelectionMode: false, viewportShowAnimation: false,
+    });
+    window.__viewer = viewer;
+    out.stage = "created";
+    out.viewerMethods = Object.getOwnPropertyNames(Object.getPrototypeOf(viewer))
+      .filter((k) => typeof viewer[k] === "function");
+    const pdb = await (await fetch("/tmp-helix.pdb")).text();
+    out.pdbLines = pdb.split("\n").length;
+    await viewer.loadStructureFromData(pdb, "pdb");
+    out.stage = "loaded";
+    const plugin = viewer.plugin;
+    out.hierarchyStructures = plugin.managers.structure.hierarchy.current.structures.length;
+    out.componentManagerMethods = Object.getOwnPropertyNames(
+      Object.getPrototypeOf(plugin.managers.structure.component))
+      .filter((k) => typeof plugin.managers.structure.component[k] === "function");
+    // What colour themes exist, by name?
+    const registry = plugin.representation.structure.themes.colorThemeRegistry;
+    out.colorThemes = registry.types.map((t) => t[0]);
+
+    // Secondary-structure colouring on every component of the structure.
+    const structures = plugin.managers.structure.hierarchy.current.structures;
+    const components = structures.flatMap((s) => s.components);
+    out.componentCount = components.length;
+    await plugin.managers.structure.component.updateRepresentationsTheme(
+      components, { color: "secondary-structure" });
+    out.stage = "themed";
+
+    // A clean embed: no axes widget, white background.
+    plugin.canvas3d.setProps({
+      camera: { helper: { axes: { name: "off", params: {} } } },
+      renderer: { backgroundColor: 0xffffff },
+    });
+    out.stage = "cleaned";
+
+    // What do the representation calls actually want?
+    const cm = plugin.managers.structure.component;
+    out.updateReprArity = cm.updateRepresentations.length;
+    out.addReprArity = cm.addRepresentation.length;
+    out.updateThemeArity = cm.updateRepresentationsTheme.length;
+    const reprRegistry = plugin.representation.structure.registry;
+    out.representationTypes = reprRegistry.types.map((t) => t[0]);
+
+    // Try the two calls the viewer makes, and record which throws.
+    try {
+      await cm.updateRepresentations(components, { type: "spacefill" });
+      out.updateReprObject = "ok";
+    } catch (e) { out.updateReprObject = String(e.message).slice(0, 120); }
+    try {
+      await cm.addRepresentation(components, { type: "ball-and-stick" });
+      out.addReprObject = "ok";
+    } catch (e) { out.addReprObject = String(e.message).slice(0, 120); }
+    try {
+      await cm.addRepresentation(components, "ball-and-stick");
+      out.addReprString = "ok";
+    } catch (e) { out.addReprString = String(e.message).slice(0, 120); }
+    await new Promise((r) => setTimeout(r, 600));
+  } catch (error) {
+    out.error = String(error && (error.stack ?? error.message ?? error)).slice(0, 400);
+  }
+  return out;
+})();
+</script></body></html>

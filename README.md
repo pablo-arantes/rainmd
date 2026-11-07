@@ -46,10 +46,11 @@ holding: a whole-complex RMSD averages the binder's drift over every receptor
 atom that did not move, so a complex coming apart reads as a small number. The
 structure view switches between solute, protein + ligand, ligand, backbone and
 heavy atoms, solvent excluded by default, and colours by element, by body, or by
-**secondary structure** — assigned live from alpha-carbon geometry, so you can
-watch a helix fray. It draws a **real cartoon ribbon**, swept in WGSL from one
-frame per residue: helices and strands as flat bands with thickness, strands
-with arrowheads, loops as thin rods, atoms optional beside it. Because an AMBER topology carries no chain IDs, the
+**secondary structure**. The structure is drawn by
+[Mol*](https://molstar.org/) — RCSB's own renderer, vendored under MIT so the
+page needs no network — with its own secondary-structure assignment. It appears
+as loaded, after minimisation and at the end of each stage, or every frame if
+you ask it to animate. Because an AMBER topology carries no chain IDs, the
 receptor/binder split is derived from the molecule partition and is **yours to
 override**: the page offers the molecule list, named by its residues, in place
 of the chain letters a PDB-based tool would ask for.

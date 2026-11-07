@@ -22,11 +22,12 @@ import {
   langevinStep, langevinFinishStep, instantaneousTemperature,
 } from "../cpu/integrate/langevin.js";
 import { Panel, PanelStack } from "./plot.js";
-import { MolViewer } from "./mol-viewer.js";
+import { MolstarViewer } from "./molstar-viewer.js";
 import { buildSelections, VIEW_PRESETS, BODY_COLOURS } from "../shared/analysis/selection.js";
 import { soluteHeavyAtoms } from "../shared/topology/restraints.js";
 import { LiveAnalysis } from "../shared/analysis/metrics.js";
 import { writePdb } from "../shared/traj/pdb.js";
+import { shareRun, logmdBundle, logmdRunId } from "../shared/traj/logmd.js";
 
 const element = (id) => document.getElementById(id);
 const logBox = element("log");
@@ -44,6 +45,17 @@ let paused = false;
 let resumeGate = null;
 let lastPositions = null;
 let selectionSystem = null;
+/**
+ * Frames kept for the share, as PDB text.
+ *
+ * 🔴 CAPPED, AND THE CAP IS THE POINT. A 500 ns production at 10 ps writes
+ * 50,000 frames; a solute-only PDB is tens of kilobytes, so keeping them all
+ * would be gigabytes of strings in a tab that also has a simulation in it. The
+ * share is for showing somebody a run, not for archiving it - the `.dcd` is the
+ * archive - so this keeps the most recent `SHARE_FRAME_CAP` and says so.
+ */
+let shareFrames = [];
+const SHARE_FRAME_CAP = 200;
 let binderOverride = null;
 /** ms/step measured on THIS system, or null until someone measures it. */
 let measuredMsPerStep = null;
@@ -366,25 +378,20 @@ function runOptions(method) {
  * count, which is what turns a mismatch into an error instead of a plausible
  * structure built from the wrong atoms.
  */
-function animateFrame(positions) {
+function animateFrame() {
   if (viewer === null || loaded === null) return;
-  const indices = visibleIndices(currentPreset());
-  const list = indices ?? null;
-  const count = list === null ? loaded.topology.atomCount : list.length;
-  const flat = new Float32Array(count * 3);
-  for (let slot = 0; slot < count; slot += 1) {
-    const atom = list === null ? slot : list[slot];
-    flat[slot * 3] = positions[atom * 3] * 10;
-    flat[slot * 3 + 1] = positions[atom * 3 + 1] * 10;
-    flat[slot * 3 + 2] = positions[atom * 3 + 2] * 10;
-  }
-  try {
-    viewer.setFrame(flat);
-  } catch (error) {
-    // A count mismatch means the preset changed under the run; redraw whole.
-    log(`  viewer: ${error.message}`);
-    showCheckpoint();
-  }
+  // 🔴 A PDB, NOT A FLAT ARRAY. 3Dmol took three writes per atom into a mutable
+  // `model.atoms`; Mol* holds coordinates in an immutable state tree, so a
+  // frame update is a reload and the currency is the same PDB a checkpoint
+  // uses. One formatter for both paths, and no second code path to keep in step
+  // with `visibleIndices`.
+  //
+  // 🔴 AND IT IS NOT AWAITED. The reload is a promise, and awaiting it inside
+  // the reporting loop would put the renderer on the integrator's critical
+  // path - a slow frame would slow the simulation rather than just dropping a
+  // frame.
+  void viewer.setFrame(viewerPdb(currentPreset()))
+    .catch((error) => log(`  viewer: ${error.message}`));
 }
 
 /**
@@ -423,7 +430,7 @@ function showLoadedStructure() {
 function ensureViewer() {
   if (viewer === null) {
     try {
-      viewer = new MolViewer(element("viewer"));
+      viewer = new MolstarViewer(element("viewer"));
     } catch (error) {
       log(`viewer: ${error.message}`);
       return null;
@@ -444,8 +451,13 @@ function viewerPdb(preset) {
   const indices = visibleIndices(preset);
   const positions = lastPositions ?? hostState?.positions
     ?? loaded.coordinates.positions;
-  return writePdb({ topology: loaded.topology, boxVectors: selectionSystem?.boxVectors ?? null },
-    positions, { indices, box: currentBox() });
+  // 🔴 NOT IMAGED, FOR THE VIEWER. Wrapping on the molecule centroid is right
+  // for a file and wrong for anything animated: a molecule crossing a face
+  // jumps a whole box width between frames. `image: false` keeps the drawing
+  // continuous; the DCD and the PDB download still wrap.
+  return writePdb({ topology: loaded.topology,
+    boxVectors: selectionSystem?.boxVectors ?? null },
+    positions, { indices, box: currentBox(), image: false });
 }
 
 /**
@@ -606,6 +618,20 @@ function report(row, extra = []) {
   // below the structure read as a viewer that failed, not as plots waiting for
   // data - and they were on screen from the moment a file loaded.
   element("panels").hidden = false;
+  // The solute only: a share of a solvated box is mostly water, and water is
+  // what nobody wants to look at.
+  if (loaded !== null && selections !== null) {
+    shareFrames.push({
+      pdb: viewerPdb(currentPreset()),
+      values: {
+        "potential / kJ/mol": Number(row.potential?.toFixed(1) ?? 0),
+        "temperature / K": Number(row.temperature?.toFixed(1) ?? 0),
+        "RMSD / nm": Number(row.rmsd?.toFixed(4) ?? 0),
+      },
+    });
+    if (shareFrames.length > SHARE_FRAME_CAP) shareFrames.shift();
+    element("share-logmd").disabled = false;
+  }
   stack.push(row);
   if (analysis !== null) stack.setBars("rmsf", analysis.rmsf.values());
   stack.draw();
@@ -767,13 +793,17 @@ function applyView(view, system, positions) {
   const indices = visibleIndices(preset);
   const pdb = writePdb({ topology: system.topology,
     boxVectors: selectionSystem?.boxVectors ?? null },
-    positions, { indices, box: currentBox() });
-  view.setStructure(pdb, { colourBy, representation });
+    positions, { indices, box: currentBox(), image: false });
+  // Mol*'s build is asynchronous; nothing downstream needs the result, and a
+  // failure is logged rather than thrown so a checkpoint cannot abort a run.
+  void view.setStructure(pdb, { colourBy, representation }).then(() => {
+    if (view.parseWarning) log(`  viewer: ${view.parseWarning}`);
+  }).catch((error) => log(`  viewer: ${error.message}`));
   const shown = indices === null ? system.topology.atomCount : indices.length;
   element("view-counts").textContent =
     `${shown.toLocaleString()} of ${system.topology.atomCount.toLocaleString()} atoms drawn`
     + (preset.heavyOnly === true ? ", hydrogens hidden" : "")
-    + ` · ${view.chains.length} chain(s)`;
+    ;
 }
 
 /**
@@ -953,6 +983,7 @@ async function runStage(label, body) {
   element("binder").disabled = true;
   paused = false;
   element("pause").textContent = "Pause";
+  shareFrames = [];
   stopSignal = new StopSignal();
   try {
     const engine = element("engine").value;
@@ -1143,7 +1174,7 @@ async function runOnDevice(stageConfig = {}) {
       // multi-hour production stage is an hour nobody is watching. It is worth
       // having for a short equilibration, where seeing the water settle is the
       // point - so it is a choice rather than a default.
-      if (element("animate").value === "on") animateFrame(lastPositions);
+      if (element("animate").value === "on") animateFrame();
       if (writer !== null) writer.appendFrame(lastPositions, system.boxVectors);
       element("download-pdb").disabled = false;
       element("download-metrics").disabled = false;
@@ -1344,6 +1375,41 @@ for (const tab of document.querySelectorAll(".tab")) {
     if (wanted === "structure") viewer?.resize();
   });
 }
+
+element("share-logmd").addEventListener("click", async () => {
+  const button = element("share-logmd");
+  if (shareFrames.length === 0) return;
+  button.disabled = true;
+  const runId = logmdRunId();
+  log("");
+  log(`sharing ${shareFrames.length} frames to LogMD as run ${runId} — this `
+    + "leaves your machine");
+  try {
+    const result = await shareRun(shareFrames, {
+      runId,
+      onProgress: (sent, total) => {
+        if (sent % 10 === 0 || sent === total) log(`  uploaded ${sent}/${total}`);
+      },
+    });
+    if (result.ok) {
+      log(`  done: ${result.url}`);
+    } else {
+      // 🔴 THE EXACT FAILURE, THEN A WAY THROUGH IT. A share that just says
+      // "failed" against a third-party service tells a reader nothing they can
+      // act on, and this particular service was returning 404 when the feature
+      // was written.
+      log(`  failed after ${result.sent}/${result.total} frames: ${result.failure}`);
+      log("  downloading the frames in LogMD's own format instead — their "
+        + "Python client can upload them; the file says how");
+      download("logmd-frames.json", logmdBundle(shareFrames, runId),
+        "application/json");
+    }
+  } catch (error) {
+    log(`  failed: ${error.message}`);
+  } finally {
+    button.disabled = false;
+  }
+});
 
 element("binder").addEventListener("change", applyBinderChoice);
 

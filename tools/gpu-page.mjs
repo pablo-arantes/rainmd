@@ -498,6 +498,7 @@ try {
           produceLockedAfterMinimise: document.getElementById("produce").disabled,
           restrainedAtoms: handle.lastRestrainedAtoms ?? null,
           animatedAtoms: handle.viewer?.atomCount ?? 0,
+          shareEnabled: !document.getElementById("share-logmd").disabled,
           animateMode: document.getElementById("animate").value,
           viewSwitch,
           binderSwitch,
@@ -570,6 +571,13 @@ try {
       if (payload.binderSwitch.length > 1 && shapes.size < 2) process.exitCode = 1;
     }
     console.log(`binder frozen mid-run:       ${payload.binderFrozenDuringRun}`);
+    // 🔴 THE SHARE BUTTON IS CHECKED FOR BEING OFFERED, NOT PRESSED. Pressing
+    // it would upload a structure to a third party from a test run, which a
+    // gate has no business doing - and the endpoint is 404ing anyway. The
+    // payload shape and both failure paths are covered by `npm test` with an
+    // injected fetch.
+    console.log(`share to LogMD:              offered: ${payload.shareEnabled}`);
+    if (payload.shareEnabled !== true) process.exitCode = 1;
     console.log(`live animation:              mode "${payload.animateMode}", `
       + `${payload.animatedAtoms} atoms in the viewer after the run`);
     if (payload.animateMode === "on" && payload.animatedAtoms === 0) process.exitCode = 1;
@@ -700,7 +708,7 @@ try {
     const payload = JSON.parse(cdpValue(result, `--view=${name}`));
     console.log(`\n--- ${name} ---`);
     console.log(payload.log.trim());
-    console.log(`viewer: ${payload.viewerAtoms} atoms parsed by 3Dmol, `
+    console.log(`viewer: ${payload.viewerAtoms} atoms in the viewer, `
       + `${payload.chains} chain(s)`);
     if (payload.viewerAtoms === 0) process.exitCode = 1;
     console.log(`render:  ${payload.renderError === null ? "validated" : payload.renderError}`);

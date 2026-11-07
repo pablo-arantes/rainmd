@@ -263,6 +263,66 @@ test("secondaryOfAtoms spreads a residue's assignment to all its atoms", () => {
     result.perResidue.length);
 });
 
+// ------------------------------------------------------------------- LogMD ----
+
+test("a LogMD frame matches the payload their own client posts", async () => {
+  const { logmdFrame, logmdRunId, logmdBundle, shareRun, LOGMD_UPLOAD_URL } =
+    await import("../shared/traj/logmd.js");
+  // 🔴 THE FIELD NAMES ARE READ OFF THEIR SOURCE, NOT GUESSED.
+  // `upload_worker_process` in logmd/logmd.py posts exactly these seven keys,
+  // and a missing or misspelled one is a 4xx with no indication which.
+  const frame = logmdFrame({ runId: "abc1234567", frame: 3, pdb: "END\n",
+    values: { "RMSD / nm": 0.1 } });
+  assert.deepEqual(Object.keys(frame).sort(), [
+    "data_dict", "file_contents", "frame_num", "project", "run_id", "token", "user_id",
+  ]);
+  // 🔴 ANONYMOUS, ALWAYS. Their client sends `token.email` as `user_id` when
+  // logged in; a page must never do that, and this is the assertion that says
+  // a future edit cannot start.
+  assert.equal(frame.user_id, "public");
+  assert.equal(frame.token, null);
+  assert.equal(frame.project, "");
+  assert.equal(frame.frame_num, "3", "frame_num is a string in their payload");
+
+  // The run id is their anonymous shape: ten hex characters.
+  assert.match(logmdRunId(), /^[0-9a-f]{10}$/);
+  assert.equal(logmdRunId().length, 10);
+
+  // 🔴 A FAILED SHARE REPORTS WHICH FRAME AND WHY, with an injected fetch so
+  // the test never touches the network. Their endpoint was returning 404 when
+  // this was written, so the failure path is the one that actually runs.
+  const notFound = await shareRun([{ pdb: "END\n" }, { pdb: "END\n" }], {
+    runId: "0123456789",
+    fetch: async () => ({ ok: false, status: 404 }),
+  });
+  assert.equal(notFound.ok, false);
+  assert.equal(notFound.sent, 0);
+  assert.match(notFound.failure, /404/);
+  assert.equal(notFound.url, "https://rcsb.ai/0123456789");
+
+  const refused = await shareRun([{ pdb: "END\n" }], {
+    fetch: async () => { throw new Error("Failed to fetch"); },
+  });
+  assert.equal(refused.ok, false);
+  // The message must name BOTH causes: a browser cannot tell CORS from a dead
+  // endpoint, and claiming one would send a reader to the wrong place.
+  assert.match(refused.failure, /CORS/);
+  assert.match(refused.failure, /down/);
+
+  const ok = await shareRun([{ pdb: "END\n" }, { pdb: "END\n" }], {
+    fetch: async () => ({ ok: true, status: 200 }),
+  });
+  assert.equal(ok.ok, true);
+  assert.equal(ok.sent, 2);
+
+  // The fallback bundle carries the same payloads and a way to post them.
+  const bundle = JSON.parse(logmdBundle([{ pdb: "END\n" }], "abcdef0123"));
+  assert.equal(bundle.frames.length, 1);
+  assert.equal(bundle.frames[0].run_id, "abcdef0123");
+  assert.equal(bundle.upload_url, LOGMD_UPLOAD_URL);
+  assert.ok(bundle.how.join(" ").includes("httpx"), "the bundle says how to post it");
+});
+
 // ----------------------------------------------------------------- imaging ----
 
 test("a written frame is wrapped into the cell, with molecules kept whole", () => {

@@ -309,3 +309,17 @@ body.loaded .pre-load-only { display: none; }
   main { padding: 14px 14px 56px; }
   .viewer { height: 340px; }
 }
+
+/* 🔴 MOL*'s VIEWPORT TOOLBAR SURVIVES EVERY `viewportShow*: false`. The icon
+   strip down the right of the canvas is rendered regardless, so the page ends
+   up with two sets of controls that do not agree about what is shown. The
+   options are honoured for the panels and the sequence strip; this is the one
+   piece that has to go by stylesheet.
+
+   🔴 AND MOL*'s CSS IS AN APPLICATION STYLESHEET. It sets type, colours and box
+   sizing for its own widget tree; scoping what we override to `#viewer` keeps
+   it from reaching the rest of the page, and loading it BEFORE rainmd.css means
+   this file wins where they collide. */
+#viewer .msp-viewport-controls { display: none !important; }
+#viewer .msp-layout-expanded, #viewer .msp-layout-standard { background: #fff; }
+#viewer .msp-plugin { font-family: inherit; }
