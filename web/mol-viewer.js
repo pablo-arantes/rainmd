@@ -48,8 +48,12 @@ export class MolViewer {
       );
     }
     this.container = container;
+    // 🔴 WHITE, LIKE THE REFERENCE AND LIKE EVERY PUBLISHED FIGURE. A dark
+    // viewer looked right against the old dark page and wrong against a light
+    // one, and a cartoon that will be screenshotted into a paper wants the
+    // background it will be printed on.
     this.viewer = window.$3Dmol.createViewer(container, {
-      backgroundColor: "#0e0f13",
+      backgroundColor: "#ffffff",
       antialias: true,
     });
     this.model = null;
@@ -89,7 +93,7 @@ export class MolViewer {
     // in the middle of a mostly empty canvas, which on a 460 px viewer reads as
     // a viewer that failed to fit the structure. 1.35 fills it without clipping
     // the outermost residue.
-    this.viewer.zoom(1.35);
+    this.viewer.zoom(1.6);
     this.viewer.render();
     this.visibleCount = this.atomCount;
   }

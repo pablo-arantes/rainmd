@@ -28,7 +28,7 @@
     "check:mdanalysis": "node tools/gpu-node.mjs tools/gpu/check-analysis.mjs && python3 -I tools/oracle/check_analysis_vs_mdanalysis.py --prefix=/tmp/rainmd-analysis --prmtop=test/fixtures/two-body.prmtop",
     "test:gpu:displacement": "node tools/gpu-node.mjs tools/gpu/check-displacement.mjs",
     "bench:skin": "node tools/gpu-node.mjs tools/gpu/bench-skin.mjs",
-    "test:page:view": "node tools/gpu-page.mjs --view=helix --draw=ribbon --shot-of=\"#viewer\" --screenshot=/tmp/rainmd-helix.png && node tools/gpu-page.mjs --view=strand --draw=ribbon --azimuth=-1.954 --elevation=-0.135 --shot-of=\"#viewer\" --screenshot=/tmp/rainmd-strand.png && node tools/gpu-page.mjs --view=mixed --draw=both --azimuth=0.9 --elevation=0.25 --shot-of=\"#viewer\" --screenshot=/tmp/rainmd-mixed.png",
+    "test:page:view": "node tools/gpu-page.mjs --view=helix --draw=cartoon --shot-of=\"#viewer\" --screenshot=/tmp/rainmd-helix.png && node tools/gpu-page.mjs --view=strand --draw=cartoon --shot-of=\"#viewer\" --screenshot=/tmp/rainmd-strand.png && node tools/gpu-page.mjs --view=mixed --draw=both --shot-of=\"#viewer\" --screenshot=/tmp/rainmd-mixed.png",
     "test:gpu:ribbon": "node tools/gpu-node.mjs tools/gpu/probe-ribbon-shader.mjs",
     "test:gpu:restraints": "node tools/gpu-node.mjs tools/gpu/check-restraints.mjs",
     "test:page:handoff": "node tools/gpu-page.mjs --handoff",

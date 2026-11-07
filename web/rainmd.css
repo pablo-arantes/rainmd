@@ -1,220 +1,311 @@
+/**
+ * RainMD's interface, built to look like LocalFold's.
+ *
+ * 🔴 LIGHT ONLY, DELIBERATELY. This sheet used to declare
+ * `color-scheme: light dark` with a dark override, so on a machine set to dark
+ * the page was a different design from the one anyone had looked at. LocalFold
+ * is light, the reference this was matched against is light, and a molecular
+ * viewer on white is what every figure in the field looks like. One design is
+ * easier to keep right than two.
+ *
+ * The idiom, taken from the reference: white cards on a near-white page with
+ * one-pixel borders and 10px corners; settings as small capitalised labels above
+ * compact controls inside a bordered group; one filled primary action and
+ * everything else quiet; results in a tabbed pane with the controls beside it.
+ */
+
 :root {
-  color-scheme: light dark;
-  --bg: #fbfaf8;
-  --panel: #ffffff;
-  --ink: #1b1a18;
-  --muted: #6b6762;
-  --line: #e3dfd8;
-  --accent: #2a6b6b;
-  --warn: #8a3a2a;
+  --bg: #f6f7f9;
+  --card: #ffffff;
+  --ink: #15181c;
+  --muted: #6a7280;
+  --faint: #9aa2ad;
+  --line: #e2e6ec;
+  --line-strong: #cfd5de;
+  --accent: #2563eb;
+  --accent-ink: #ffffff;
+  --accent-soft: #eff4ff;
+  --info-bg: #eef5ff;
+  --info-line: #cfe0fb;
+  --warn: #b3443a;
+  --warn-bg: #fdf1f0;
+  --radius: 10px;
+  --radius-sm: 7px;
 }
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #16181a;
-    --panel: #1e2124;
-    --ink: #e8e6e3;
-    --muted: #9a958e;
-    --line: #2f3438;
-    --accent: #6fbdbd;
-    --warn: #e08a72;
-  }
-}
+
 * { box-sizing: border-box; }
+
 body {
   margin: 0;
-  padding: 0 16px 64px;
   background: var(--bg);
   color: var(--ink);
-  font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
 }
-header { max-width: 60rem; margin: 0 auto; padding: 40px 0 8px; }
-h1 { margin: 0; font-size: 1.9rem; letter-spacing: -0.015em; }
-.tagline { margin: 6px 0 0; color: var(--muted); }
-main { max-width: 60rem; margin: 0 auto; }
-.panel {
-  background: var(--panel);
+
+/* ------------------------------------------------------------------ topbar ---- */
+
+.topbar {
+  position: sticky; top: 0; z-index: 20;
+  background: var(--card);
+  border-bottom: 1px solid var(--line);
+}
+.topbar-inner {
+  max-width: 84rem; margin: 0 auto; padding: 12px 20px;
+  display: flex; align-items: center; gap: 16px;
+}
+.topbar h1 {
+  margin: 0; font-size: 1.35rem; font-weight: 800; letter-spacing: -0.02em;
+}
+/* 🔴 THE ACTIONS SIT RIGHT AND STAY PUT. `margin-left: auto` rather than
+   `justify-content: space-between`, so adding a third button does not move the
+   wordmark. */
+.topbar-actions { margin-left: auto; display: flex; flex-wrap: wrap; gap: 8px; }
+
+/* ------------------------------------------------------------------- cards ---- */
+
+main { max-width: 84rem; margin: 0 auto; padding: 18px 20px 72px; }
+
+.card {
+  background: var(--card);
   border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 18px 20px;
-  margin: 18px 0;
+  border-radius: var(--radius);
+  padding: 16px;
+  margin: 0 0 16px;
 }
-.panel h2 { margin: 0 0 10px; font-size: 1.05rem; letter-spacing: -0.01em; }
-.panel p { margin: 8px 0; }
-code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.92em; }
-dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 10px 0 0; }
-dt { color: var(--muted); }
-dd { margin: 0; font-variant-numeric: tabular-nums; }
-.drop-zone {
-  border: 1.5px dashed var(--line);
-  border-radius: 8px;
-  padding: 22px;
-  text-align: center;
+.card-title {
+  display: block; font-size: 0.72rem; font-weight: 700;
+  letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--faint); margin: 0 0 10px;
+}
+
+/* -------------------------------------------------------------- the inputs ---- */
+
+.entity-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.entity-row > select { flex: 1 1 24rem; min-width: 0; }
+.drop-inline {
+  flex: 1 1 18rem; min-width: 0;
+  border: 1.5px dashed var(--line-strong); border-radius: var(--radius-sm);
+  padding: 7px 10px; font-size: 0.84rem; color: var(--muted);
   transition: border-color 0.15s, background 0.15s;
 }
-.drop-zone.over { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
-.drop-zone input { display: block; margin: 0 auto 8px; }
-.drop-zone label { color: var(--muted); font-size: 0.92rem; }
-.controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: 10px 18px; margin: 12px 0; }
-.controls label { display: flex; flex-direction: column; gap: 3px; color: var(--muted); font-size: 0.86rem; }
-.controls input, .controls select {
-  padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px;
-  background: var(--bg); color: var(--ink); font: inherit;
-}
-.buttons { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0 6px; }
-button {
-  padding: 8px 14px; border: 1px solid var(--accent); border-radius: 6px;
-  background: var(--accent); color: var(--panel); font: inherit; cursor: pointer;
-}
-button:disabled { opacity: 0.45; cursor: default; }
-button#stop, button#check-gpu { background: transparent; color: var(--accent); }
-.log {
-  margin: 12px 0 0; padding: 12px; max-height: 20rem; overflow: auto;
-  background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 0.82rem; line-height: 1.5; white-space: pre; tab-size: 2;
-}
-.error { color: var(--warn); white-space: pre-wrap; }
-.caveat { border-left: 3px solid var(--accent); }
-.caveat strong { color: var(--warn); }
-@media (max-width: 34rem) { body { padding: 0 12px 48px; } .controls { grid-template-columns: 1fr; } }
+.drop-inline.over { border-color: var(--accent); background: var(--accent-soft); }
+.drop-inline input[type="file"] { display: none; }
+.drop-inline label { cursor: pointer; }
+.drop-inline code { font-size: 0.95em; }
 
-.live {
-  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
-  gap: 6px 14px; margin-top: 14px;
+/* 🔴 THE SETTINGS GROUP IS LOCALFOLD'S MODEL / SEED / RECYCLES BLOCK: one thin
+   border around the lot, and each control sits under a small capitalised label
+   rather than beside a sentence. It is what makes nine fields read as one
+   thing. `auto-fit` over `minmax` is what lets the same markup be three columns
+   on a laptop and one on a phone with no breakpoint. */
+.fieldgroup {
+  margin: 14px 0 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  display: grid; gap: 10px 14px;
+  grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr));
+  align-items: end;
 }
-.live > div {
-  display: flex; flex-direction: column; gap: 1px;
-  padding: 7px 10px; border: 1px solid var(--line); border-radius: 7px;
-  background: var(--bg);
-}
-.live .label { color: var(--muted); font-size: 0.74rem; letter-spacing: 0.02em; }
-.live .value { font-variant-numeric: tabular-nums; font-size: 0.98rem; }
-.panels {
-  display: grid; grid-template-columns: repeat(auto-fit, minmax(19rem, 1fr));
-  gap: 10px; margin-top: 14px;
-}
-.plot {
-  display: block; width: 100%; height: 150px;
-  border: 1px solid var(--line); border-radius: 8px; background: var(--bg);
-}
-.view-bar {
-  display: flex; flex-wrap: wrap; align-items: center; gap: 14px; margin-top: 14px;
-}
-.view-bar label {
-  display: inline-flex; align-items: center; gap: 6px;
-  color: var(--muted); font-size: 0.86rem;
-}
-.view-bar select {
-  padding: 5px 7px; border: 1px solid var(--line); border-radius: 6px;
-  background: var(--bg); color: var(--ink); font: inherit; font-size: 0.86rem;
+.field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+/* 🔴 A LABEL WRAPS RATHER THAN CLIPPING. `text-overflow: ellipsis` turned
+   "Time per stride / ns" into "TIME PER STRIDE …" and "Restraint / kJ·mol⁻¹·nm⁻²"
+   into "RESTRAINT / KJ·…", which hides the units - the one part of a label a
+   reader cannot guess. Two short lines are better than one truncated one, and
+   the min-height keeps the controls on a common baseline whether a label takes
+   one line or two. */
+.field-label {
+  font-size: 0.68rem; font-weight: 700; letter-spacing: 0.055em;
+  text-transform: uppercase; color: var(--faint);
+  line-height: 1.25; min-height: 1.7em;
+  display: flex; align-items: flex-end;
 }
 
+input[type="number"], select {
+  font: inherit; font-size: 0.88rem;
+  width: 100%; min-width: 0; padding: 6px 8px;
+  color: var(--ink); background: var(--card);
+  border: 1px solid var(--line-strong); border-radius: var(--radius-sm);
+}
+input[type="number"]:focus, select:focus {
+  outline: none; border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+/* The three stages, side by side where there is room. */
+.stages {
+  display: grid; gap: 14px; margin-top: 14px;
+  grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr));
+}
+.stages .fieldgroup { margin: 0; grid-template-columns: repeat(auto-fit, minmax(7.5rem, 1fr)); }
+.stage-name {
+  grid-column: 1 / -1;
+  font-size: 0.86rem; font-weight: 700;
+}
+.stage-name em { font-weight: 400; font-style: normal; color: var(--faint); }
+.estimate {
+  grid-column: 1 / -1; margin: 2px 0 0;
+  font-size: 0.76rem; color: var(--muted); font-variant-numeric: tabular-nums;
+}
+
+/* ----------------------------------------------------------------- buttons ---- */
+
+.btn {
+  font: inherit; font-size: 0.86rem; font-weight: 500;
+  padding: 7px 13px; border-radius: var(--radius-sm);
+  border: 1px solid var(--line-strong); background: var(--card); color: var(--ink);
+  cursor: pointer; white-space: nowrap;
+  transition: background 0.12s, border-color 0.12s, opacity 0.12s;
+}
+.btn:hover:not(:disabled) { background: #f2f4f7; }
+.btn:disabled { opacity: 0.45; cursor: default; }
+.btn-primary {
+  background: var(--accent); border-color: var(--accent); color: var(--accent-ink);
+  font-weight: 600;
+}
+.btn-primary:hover:not(:disabled) { background: #1d4fd8; }
+.btn-ghost { background: var(--card); }
+.btn-quiet { font-size: 0.8rem; padding: 6px 10px; color: var(--muted); }
+.buttons { display: flex; flex-wrap: wrap; gap: 7px; }
+
+/* ----------------------------------------------------------------- banners ---- */
+
+.banner {
+  margin: 0 0 16px; padding: 10px 14px;
+  border-radius: var(--radius-sm); font-size: 0.88rem;
+  background: var(--info-bg); border: 1px solid var(--info-line);
+}
+.banner-error { background: var(--warn-bg); border-color: #f0cdc8; color: var(--warn); }
+
+/* ----------------------------------------------------------------- results ---- */
+
+.results {
+  display: grid; gap: 16px;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 20rem);
+  align-items: start;
+}
+.side { min-width: 0; position: sticky; top: 74px; }
+.side .card:last-child { margin-bottom: 0; }
+.pane { padding: 0; overflow: hidden; }
+
+/* Tabs, which is what the reference uses to put three views in one pane
+   instead of three screens of scrolling. */
+.tabs {
+  display: flex; gap: 2px; padding: 8px 10px 0;
+  border-bottom: 1px solid var(--line); background: #fbfcfd;
+}
+.tab {
+  font: inherit; font-size: 0.85rem; font-weight: 500;
+  padding: 7px 14px; cursor: pointer;
+  background: transparent; color: var(--muted);
+  border: 1px solid transparent; border-bottom: 0;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  margin-bottom: -1px;
+}
+.tab:hover { color: var(--ink); }
+.tab.is-active {
+  background: var(--card); color: var(--ink); font-weight: 600;
+  border-color: var(--line); border-bottom-color: var(--card);
+}
+.tab-body { padding: 14px; }
+
+/* 🔴 AN EXPLICIT HEIGHT AND `position: relative`. 3Dmol absolutely positions
+   its canvas inside the container and measures clientHeight when it is created,
+   so a container with no height gives a zero-sized canvas and a blank viewer
+   with nothing in the console. White, to match the reference and every
+   published figure. */
 .viewer {
-  display: block; width: 100%; height: 340px; margin-top: 14px;
-  border: 1px solid var(--line); border-radius: 8px; background: #121416;
-  cursor: grab; touch-action: none;
-}
-.viewer:active { cursor: grabbing; }
-.hint { color: var(--muted); font-size: 0.8rem; margin: 6px 0 0; }
-.toggle {
-  display: inline-flex; align-items: center; gap: 6px;
-  color: var(--muted); font-size: 0.86rem;
-}
-.toggle input { margin: 0; }
-
-/* The example row, which is how a visitor with no AMBER files tries the page. */
-.example-row {
-  display: flex; gap: 8px; align-items: center; margin: 8px 0 4px;
-  flex-wrap: wrap;
-}
-.example-row select { flex: 1 1 22rem; min-width: 0; }
-
-/* 🔴 A DIV WITH AN EXPLICIT HEIGHT AND `position: relative`. 3Dmol absolutely
-   positions its canvas inside the container and measures clientHeight at
-   creation - a container with no height gives a zero-sized canvas and a blank
-   viewer with no error anywhere. */
-.viewer {
-  position: relative; width: 100%; height: 460px;
-  border: 1px solid var(--line); border-radius: 8px;
-  background: #0e0f13; overflow: hidden;
+  position: relative; width: 100%; height: 480px;
+  background: #ffffff;
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+  overflow: hidden;
 }
 .viewer canvas { display: block; }
 
-/* ------------------------------------------------------------- workspace ----
- * 🔴 THE VIEWER WAS BELOW EVERY CONTROL, WHICH IS THE WHOLE COMPLAINT. One
- * 60rem column with the settings, three stages and five export buttons stacked
- * above it put the structure - the thing someone actually looks at - a full
- * screen down, and the analysis panels a screen below that. LocalFold puts its
- * controls in a sidebar and gives the rest to the viewer; this does the same.
- *
- * 🔴 AND THE VIEWER COLUMN IS STICKY, so scrolling the log or the panels does
- * not scroll the structure out of sight. `align-self: start` is what lets it
- * be: a grid item stretches by default and a stretched item cannot stick.
- */
-main { max-width: 84rem; }
-.workspace {
-  display: grid;
-  grid-template-columns: minmax(0, 23rem) minmax(0, 1fr);
-  gap: 22px;
-  align-items: start;
-}
-.column-controls { min-width: 0; }
-.column-view { min-width: 0; position: sticky; top: 14px; align-self: start; }
-
-/* One column below the width where two would squeeze the viewer, and the
-   structure comes FIRST there - a phone should not have to scroll past the
-   controls to see what it loaded. */
-@media (max-width: 62rem) {
-  main { max-width: 60rem; }
-  .workspace { grid-template-columns: minmax(0, 1fr); }
-  .column-view { position: static; order: -1; }
+.panels { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); }
+.plot {
+  display: block; width: 100%; height: 150px;
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: var(--card);
 }
 
-/* The stages read as steps, not as a wall of fields. */
-.column-controls h3 {
-  margin: 20px 0 8px;
-  padding-top: 14px;
-  border-top: 1px solid var(--line);
-  font-size: 0.98rem;
-  letter-spacing: 0.01em;
+.log {
+  margin: 0; max-height: 480px; overflow: auto;
+  font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--ink); white-space: pre-wrap; word-break: break-word;
 }
-.column-controls h3:first-of-type { border-top: 0; padding-top: 0; margin-top: 10px; }
-.column-controls h3 .hint { font-weight: 400; }
-.controls { display: grid; gap: 8px 14px; grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr)); }
-.controls label { display: flex; flex-direction: column; gap: 3px; font-size: 0.85rem; color: var(--muted); }
-.controls input, .controls select { font: inherit; padding: 5px 7px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--ink); }
-.controls .hint { grid-column: 1 / -1; margin: 2px 0 0; }
-.buttons { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 0; }
-.live { display: grid; grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr)); gap: 6px 12px; margin: 0 0 12px; }
 
-/* 🔴 THE INTRO COLLAPSES ONCE THERE IS A SYSTEM. Before a load the drop-zone
-   copy and the example list are the most useful things on the page; after one
-   they are 500 px of scrolling between the reader and the structure they just
-   loaded, which is what put the viewer a screen down. */
-body.loaded .pre-load-only { display: none; }
-body.loaded #status-panel { padding: 10px 20px; }
-body.loaded #status-panel h2 { font-size: 0.95rem; margin: 0 0 4px; }
-body.loaded .viewer-note { display: none; }
+/* 🔴 THE METRICS STRIP IS THE REFERENCE'S pLDDT / pTM / ipTM ROW: a small grey
+   label with a bold tabular number under it, wrapping into as many columns as
+   fit. A definition list read as a table of prose before; the numbers are the
+   content and should be what the eye lands on. */
+.metrics {
+  display: grid; gap: 8px 14px; margin: 0;
+  grid-template-columns: repeat(auto-fit, minmax(6.5rem, 1fr));
+}
+.metrics > div { min-width: 0; }
+.metrics dt {
+  font-size: 0.67rem; font-weight: 600; letter-spacing: 0.05em;
+  text-transform: uppercase; color: var(--faint);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.metrics dd {
+  margin: 1px 0 0; font-weight: 650; font-size: 0.95rem;
+  font-variant-numeric: tabular-nums;
+}
+.metrics:empty { display: none; }
 
-/* 🔴 THE REPORTS WRAP INTO COLUMNS RATHER THAN RUNNING DOWN THE PAGE. Ten
-   label/value pairs in a single `max-content 1fr` grid is ten rows tall, and
-   with two of those stacked above the workspace the structure started a screen
-   down. Repeating the pair across as many columns as fit turns each report
-   into two or three rows without losing anything. */
+/* 🔴 THE REPORTS USE THE SAME IDIOM AS THE METRICS STRIP, label above value.
+   Side by side in a narrow column they wrapped mid-value - "two-body.prmtop +
+   two-/body.inpcrd" over four lines, and the box dimensions over three - because
+   a `max-content 1fr` pair in a 14rem column leaves the value almost no room.
+   Stacking the label gives the value the whole cell. */
+dl { display: grid; gap: 3px 16px; margin: 0; grid-template-columns: max-content 1fr; }
+dt { color: var(--muted); font-size: 0.82rem; }
+dd { margin: 0; font-size: 0.82rem; font-variant-numeric: tabular-nums; }
 #system-report, #device-report {
-  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
-  gap: 2px 18px;
-  font-size: 0.86rem;
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+  gap: 10px 16px; margin-top: 14px;
 }
-#system-report > div, #device-report > div { display: flex; gap: 8px; }
-#system-report dt, #device-report dt { min-width: 9rem; }
-/* The pairs are siblings, so each dt+dd needs to sit on one line: subgrid is
-   the clean way and is widely supported now. */
-#system-report, #device-report { grid-auto-flow: row dense; }
-#system-report dt, #device-report dt { grid-column: auto; }
+#system-report > div, #device-report > div {
+  display: flex; flex-direction: column; gap: 1px; min-width: 0;
+}
+#system-report dt, #device-report dt {
+  font-size: 0.66rem; font-weight: 600; letter-spacing: 0.05em;
+  text-transform: uppercase; color: var(--faint);
+}
+#system-report dd, #device-report dd { font-size: 0.84rem; font-weight: 500; }
 
-/* 🔴 `hidden` LOSES TO `display: grid`, WHICH IS WHY THE EMPTY PANELS STILL
-   SHOWED. The attribute works through a UA rule of `display: none`, and any
-   author rule setting display beats it. Every element in this sheet that both
-   carries `hidden` and sets `display` needs this. */
-.panels[hidden], .example-row[hidden], [hidden] { display: none !important; }
+/* --------------------------------------------------------------- utilities ---- */
+
+.hint { margin: 8px 0 0; font-size: 0.78rem; color: var(--muted); }
+.caveat { font-size: 0.86rem; color: var(--muted); }
+.caveat h2 { font-size: 1rem; margin: 0 0 8px; color: var(--ink); }
+.caveat strong { color: var(--ink); }
+.caveat p { margin: 0 0 8px; }
+code { font: 0.92em ui-monospace, SFMono-Regular, Menlo, monospace; }
+a { color: var(--accent); }
+body.loaded .pre-load-only { display: none; }
+
+/* 🔴 `hidden` LOSES TO ANY AUTHOR `display`, WHICH IS WHY THE EMPTY PANELS
+   SHOWED. The attribute works through a UA rule of `display: none`, and a rule
+   of `display: grid` in this file beats it. */
+[hidden] { display: none !important; }
+
+/* ------------------------------------------------------------- narrow view ---- */
+
+@media (max-width: 64rem) {
+  .results { grid-template-columns: minmax(0, 1fr); }
+  /* The structure comes first on a phone: a reader should not scroll past the
+     controls to see what they just loaded. */
+  .side { position: static; order: 2; }
+  .pane { order: 1; }
+}
+@media (max-width: 40rem) {
+  .topbar-inner { padding: 10px 14px; }
+  .topbar-actions { width: 100%; }
+  .topbar-actions .btn { flex: 1 1 auto; }
+  main { padding: 14px 14px 56px; }
+  .viewer { height: 340px; }
+}

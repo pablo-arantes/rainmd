@@ -7,187 +7,214 @@
 <link rel="stylesheet" href="web/rainmd.css">
 </head>
 <body>
-<header>
-  <h1>RainMD</h1>
-  <p class="tagline">Molecular dynamics in the browser, on your own GPU, from an
-  AMBER topology.</p>
+
+<!-- 🔴 THE HEADER CARRIES THE ACTIONS, as LocalFold's does: the wordmark on the
+     left and the thing you came to press on the right, with the primary action
+     filled and the rest quiet. Minimise, Equilibrate and Production were three
+     buttons buried at three different depths of a sidebar; here they are always
+     where a reader last saw them. -->
+<header class="topbar">
+  <div class="topbar-inner">
+    <h1>RainMD</h1>
+    <div class="topbar-actions">
+      <button id="check-gpu" class="btn btn-quiet" type="button">Check the GPU kernels</button>
+      <button id="minimise" class="btn btn-ghost" type="button">Minimise</button>
+      <button id="equilibrate" class="btn btn-ghost" type="button" disabled>Equilibrate</button>
+      <button id="produce" class="btn btn-primary" type="button" disabled>Run production</button>
+    </div>
+  </div>
 </header>
 
 <main>
-  <section class="panel" id="status-panel">
-    <h2>This machine</h2>
-    <dl id="device-report"><dt>WebGPU</dt><dd>checking…</dd></dl>
-  </section>
-
-  <section class="panel">
-    <h2>Load a system</h2>
-    <p class="pre-load-only">Drop the <code>.prmtop</code> and <code>.crd</code> (or
-    <code>.inpcrd</code>) that <code>saveamberparm</code> wrote — the pair from
-    one <a href="https://github.com/pablo-arantes/making-it-rain">Making-it-rain</a>
-    notebook run.</p>
-    <div id="drop-zone" class="drop-zone">
-      <input type="file" id="file-input" multiple accept=".prmtop,.parm7,.crd,.inpcrd,.rst7">
-      <label for="file-input">Choose files, or drop them here</label>
-    </div>
-    <p class="hint pre-load-only">No AMBER files to hand? Load one of the systems this
-    repository tests itself against:</p>
-    <div class="example-row pre-load-only">
-      <select id="example">
-        <option value="ala-wat">alanine dipeptide in TIP3P + ions — 1190 atoms, periodic, runs on the GPU</option>
-        <option value="two-body">two peptides in water — 2547 atoms, periodic, splits RMSD four ways</option>
-        <option value="mixed">helix + loop + strand — 234 atoms, vacuum, for the cartoon ribbon</option>
+  <!-- The input card: what to run, then how. One row for the system and a
+       bordered group of small uppercase-labelled fields for the settings,
+       which is LocalFold's MODEL / SEED / RECYCLES idiom. -->
+  <section class="card">
+    <div class="entity-row">
+      <select id="example" aria-label="Example system">
+        <option value="ala-wat">alanine dipeptide in TIP3P + ions — 1190 atoms, periodic</option>
+        <option value="two-body">two peptides in water — 2547 atoms, periodic, four-way RMSD</option>
+        <option value="mixed">helix + loop + strand — 234 atoms, vacuum</option>
         <option value="helix">alpha helix — 162 atoms, vacuum</option>
         <option value="strand">beta strand — 162 atoms, vacuum</option>
       </select>
-      <button id="load-example" type="button">Load example</button>
+      <button id="load-example" class="btn btn-ghost" type="button">Load example</button>
+      <div id="drop-zone" class="drop-inline">
+        <input type="file" id="file-input" multiple
+               accept=".prmtop,.parm7,.crd,.inpcrd,.rst7">
+        <label for="file-input">or choose your own <code>.prmtop</code> +
+          <code>.inpcrd</code>, or drop them here</label>
+      </div>
     </div>
-    <p class="hint pre-load-only">A vacuum system has no periodic box, so the GPU engine
-    refuses it — it implements PME, which needs one. Those three are there to
-    look at; the two periodic ones are there to run.</p>
-    <dl id="system-report" hidden></dl>
-    <p id="load-error" class="error" hidden></p>
-  </section>
+    <p class="hint pre-load-only">A vacuum system has no periodic box, so the GPU
+    engine refuses it — it implements PME, which needs one. Those three are to
+    look at; the two periodic ones are to run.</p>
 
-  <section class="panel" id="run-panel" hidden>
-    <h2>Run</h2>
-    <div class="workspace">
-    <div class="column-controls">
-    <div class="controls">
-      <label>Nonbonded
+    <dl id="system-report" hidden></dl>
+
+    <div class="fieldgroup">
+      <div class="field"><span class="field-label">Nonbonded</span>
         <select id="method">
           <option value="PME">PME</option>
-          <option value="NoCutoff">NoCutoff (non-periodic only)</option>
-        </select>
-      </label>
-      <label>Constraints
+          <option value="NoCutoff">NoCutoff</option>
+        </select></div>
+      <div class="field"><span class="field-label">Constraints</span>
         <select id="constraints">
           <option value="HBonds">HBonds</option>
           <option value="none">none</option>
           <option value="AllBonds">AllBonds</option>
-        </select>
-      </label>
-      <label>Cutoff / nm <input type="number" id="cutoff" value="1.0" step="0.1" min="0.5"></label>
-      <label>Temperature / K <input type="number" id="temperature" value="298" step="1"></label>
-      <label>Timestep / fs <input type="number" id="timestep" value="2" step="0.5" min="0.5"></label>
-      <label>Friction / ps⁻¹ <input type="number" id="friction" value="10" step="1" min="0"></label>
-      <label>Pressure / bar <input type="number" id="pressure" value="1" step="1" placeholder="blank = NVT"></label>
-      <label>Neighbour rebuild / steps <input type="number" id="rebuild" value="20" step="5" min="1"></label>
-      <label>Engine
+        </select></div>
+      <div class="field"><span class="field-label">Cutoff / nm</span>
+        <input type="number" id="cutoff" value="1.0" step="0.1" min="0.5"></div>
+      <div class="field"><span class="field-label">Temperature / K</span>
+        <input type="number" id="temperature" value="298" step="1"></div>
+      <div class="field"><span class="field-label">Timestep / fs</span>
+        <input type="number" id="timestep" value="2" step="0.5" min="0.5"></div>
+      <div class="field"><span class="field-label">Friction / ps⁻¹</span>
+        <input type="number" id="friction" value="1" step="1" min="0"></div>
+      <div class="field"><span class="field-label">Pressure / bar</span>
+        <input type="number" id="pressure" value="1" step="1" placeholder="blank = NVT"></div>
+      <div class="field"><span class="field-label">Rebuild / steps</span>
+        <input type="number" id="rebuild" value="20" step="5" min="1"></div>
+      <div class="field"><span class="field-label">Engine</span>
         <select id="engine">
           <option value="gpu">GPU (WebGPU)</option>
-          <option value="host">host reference (slow, for comparison)</option>
-        </select>
-      </label>
+          <option value="host">host reference</option>
+        </select></div>
     </div>
 
-    <!-- The three stages, in the order the Making-it-rain notebooks run them.
-         Each has its own button because the notebooks are separate cells and
-         because a 500 ns production is not something to start by accident. -->
-    <h3>1 — Minimise</h3>
-    <div class="controls">
-      <label>Steps
-        <select id="min-steps">
-          <option>1000</option><option>5000</option><option selected>10000</option>
-          <option>20000</option><option>50000</option><option>100000</option>
-        </select>
-      </label>
-      <span class="hint">Tolerance 10 kJ/mol/nm, as the notebooks set it.</span>
-    </div>
-    <div class="buttons">
-      <button id="minimise">Minimise</button>
-      <button id="calibrate" disabled>Time this system</button>
-    </div>
+    <!-- The three stages the notebooks run, each its own group so the order
+         reads as a protocol rather than as a wall of fields. -->
+    <div class="stages">
+      <div class="fieldgroup stage">
+        <span class="stage-name">1 · Minimise</span>
+        <div class="field"><span class="field-label">Steps</span>
+          <select id="min-steps">
+            <option>1000</option><option>5000</option><option selected>10000</option>
+            <option>20000</option><option>50000</option><option>100000</option>
+          </select></div>
+        <div class="field"><span class="field-label">&nbsp;</span>
+          <button id="calibrate" class="btn btn-ghost" type="button" disabled>Time this system</button></div>
+        <p class="estimate">Tolerance 10 kJ/mol/nm, as the notebooks set it.</p>
+      </div>
 
-    <h3>2 — Equilibrate <span class="hint">NPT, solute restrained</span></h3>
-    <div class="controls">
-      <label>Time / ns <input type="number" id="eq-time" value="0.2" step="0.1" min="0"></label>
-      <label>Restraint / kJ/mol/nm²
-        <input type="number" id="eq-restraint" value="500" step="100" min="0" max="2000">
-      </label>
-      <label>Trajectory every / ps
-        <select id="eq-write">
-          <option>1</option><option selected>10</option><option>100</option><option>200</option>
-          <option>500</option><option>1000</option>
-        </select>
-      </label>
-      <span class="hint" id="eq-estimate"></span>
-    </div>
-    <div class="buttons">
-      <button id="equilibrate" disabled>Equilibrate</button>
-    </div>
+      <div class="fieldgroup stage">
+        <span class="stage-name">2 · Equilibrate <em>NPT, solute restrained</em></span>
+        <div class="field"><span class="field-label">Time / ns</span>
+          <input type="number" id="eq-time" value="0.2" step="0.1" min="0"></div>
+        <div class="field"><span class="field-label">Restraint k</span>
+          <input type="number" id="eq-restraint" value="500" step="100" min="0" max="2000"></div>
+        <div class="field"><span class="field-label">Trajectory / ps</span>
+          <select id="eq-write">
+            <option>1</option><option selected>10</option><option>100</option>
+            <option>200</option><option>500</option><option>1000</option>
+          </select></div>
+        <p class="estimate">Restraint in kJ·mol⁻¹·nm⁻², on solute heavy atoms.</p>
+        <p class="estimate" id="eq-estimate"></p>
+      </div>
 
-    <h3>3 — Production <span class="hint">NPT, unrestrained</span></h3>
-    <div class="controls">
-      <label>Time per stride / ns <input type="number" id="prod-time" value="2" step="1" min="0"></label>
-      <label>Strides <input type="number" id="prod-strides" value="1" step="1" min="1"></label>
-      <label>Trajectory every / ps
-        <select id="prod-write">
-          <option>1</option><option selected>10</option><option>100</option><option>200</option>
-          <option>500</option><option>1000</option>
-        </select>
-      </label>
-      <span class="hint" id="prod-estimate"></span>
+      <div class="fieldgroup stage">
+        <span class="stage-name">3 · Production <em>NPT, unrestrained</em></span>
+        <div class="field"><span class="field-label">Stride / ns</span>
+          <input type="number" id="prod-time" value="2" step="1" min="0"></div>
+        <div class="field"><span class="field-label">Strides</span>
+          <input type="number" id="prod-strides" value="1" step="1" min="1"></div>
+        <div class="field"><span class="field-label">Trajectory / ps</span>
+          <select id="prod-write">
+            <option>1</option><option selected>10</option><option>100</option>
+            <option>200</option><option>500</option><option>1000</option>
+          </select></div>
+        <p class="estimate" id="prod-estimate"></p>
+      </div>
     </div>
-    <div class="buttons">
-      <button id="produce" disabled>Run production</button>
-      <button id="stop" disabled>Stop</button>
-      <button id="pause" disabled>Pause</button>
-      <button id="check-gpu">Check the GPU kernels</button>
-    </div>
-    <div class="buttons">
-      <button id="download-dcd" disabled>trajectory (.dcd)</button>
-      <button id="download-state" disabled>restart (.rst7)</button>
-      <button id="download-pdb" disabled>current frame (.pdb)</button>
-      <button id="download-metrics" disabled>metrics (.csv)</button>
-      <button id="download-rmsf" disabled>per-residue RMSF (.csv)</button>
-    </div>
-    </div><!-- /column-controls -->
-
-    <div class="column-view">
-    <dl id="live" class="live"></dl>
-    <div class="view-bar">
-      <label>Show
-        <select id="view-preset"></select>
-      </label>
-      <label>Draw
-        <select id="representation">
-          <option value="cartoon" selected>cartoon</option>
-          <option value="both">cartoon + sticks</option>
-          <option value="spheres">atoms</option>
-        </select>
-      </label>
-      <label>Colour by
-        <select id="colour-by">
-          <option value="structure" selected>secondary structure</option>
-          <option value="chain">chain</option>
-          <option value="element">element</option>
-        </select>
-      </label>
-      <label id="binder-row" hidden>Binder
-        <select id="binder" title="Which solute molecule is the binder. An AMBER topology carries no chain IDs, so this is the molecule list instead."></select>
-      </label>
-      <span id="view-counts" class="hint"></span>
-    </div>
-    <div id="viewer" class="viewer"></div>
-    <p class="hint viewer-note">Drag to rotate, scroll to zoom. The cartoon is 3Dmol's, with
-    its own secondary-structure assignment — the same representation LocalFold
-    draws. The structure is shown as loaded, after minimisation, and at the end
-    of each stage; the trajectory itself is in the <code>.dcd</code>.</p>
-
-    <div class="panels" id="panels" hidden>
-      <canvas id="plot-rmsd" class="plot"></canvas>
-      <canvas id="plot-rg" class="plot"></canvas>
-      <canvas id="plot-energy" class="plot"></canvas>
-      <canvas id="plot-rmsf" class="plot"></canvas>
-      <canvas id="plot-iface" class="plot"></canvas>
-      <canvas id="plot-temperature" class="plot"></canvas>
-    </div>
-    <pre id="log" class="log"></pre>
-    </div><!-- /column-view -->
-    </div><!-- /workspace -->
   </section>
 
-  <section class="panel caveat">
+  <p id="load-error" class="banner banner-error" hidden></p>
+
+  <!-- Results, in LocalFold's two columns: a tabbed pane on the left and the
+       controls, readout and downloads on the right. -->
+  <div class="results" id="run-panel" hidden>
+    <section class="card pane">
+      <div class="tabs" role="tablist">
+        <button class="tab is-active" type="button" data-pane="structure" role="tab">Structure</button>
+        <button class="tab" type="button" data-pane="analysis" role="tab">Analysis</button>
+        <button class="tab" type="button" data-pane="log" role="tab">Log</button>
+      </div>
+      <div class="tab-body" data-body="structure">
+        <div id="viewer" class="viewer"></div>
+        <p class="hint">Drag to rotate, scroll to zoom. 3Dmol's Richardson
+        cartoon with its own secondary-structure assignment — shown as loaded,
+        after minimisation and at the end of each stage.</p>
+      </div>
+      <div class="tab-body" data-body="analysis" hidden>
+        <div class="panels" id="panels" hidden>
+          <canvas id="plot-rmsd" class="plot"></canvas>
+          <canvas id="plot-rg" class="plot"></canvas>
+          <canvas id="plot-energy" class="plot"></canvas>
+          <canvas id="plot-rmsf" class="plot"></canvas>
+          <canvas id="plot-iface" class="plot"></canvas>
+          <canvas id="plot-temperature" class="plot"></canvas>
+        </div>
+        <p class="hint">Six panels following JIGGLE's set. RMSD is split four
+        ways once a system has two solute bodies.</p>
+      </div>
+      <div class="tab-body" data-body="log" hidden>
+        <pre id="log" class="log"></pre>
+      </div>
+    </section>
+
+    <aside class="side">
+      <section class="card">
+        <div class="fieldgroup">
+          <div class="field"><span class="field-label">Show</span>
+            <select id="view-preset"></select></div>
+          <div class="field"><span class="field-label">Draw</span>
+            <select id="representation">
+              <option value="cartoon" selected>cartoon</option>
+              <option value="both">cartoon + sticks</option>
+              <option value="spheres">atoms</option>
+            </select></div>
+          <div class="field"><span class="field-label">Colour by</span>
+            <select id="colour-by">
+              <option value="structure" selected>secondary structure</option>
+              <option value="chain">chain</option>
+              <option value="element">element</option>
+            </select></div>
+          <div class="field" id="binder-row" hidden><span class="field-label">Binder</span>
+            <select id="binder" title="Which solute molecule is the binder. An AMBER topology carries no chain IDs, so this is the molecule list instead."></select></div>
+        </div>
+        <p class="hint" id="view-counts"></p>
+      </section>
+
+      <!-- The metrics strip, which is LocalFold's pLDDT / pTM / ipTM row: a
+           label above a bold tabular value, wrapping into as many columns as fit. -->
+      <section class="card">
+        <dl id="live" class="metrics"></dl>
+        <div class="buttons">
+          <button id="stop" class="btn btn-quiet" type="button" disabled>Stop</button>
+          <button id="pause" class="btn btn-quiet" type="button" disabled>Pause</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <span class="card-title">Download</span>
+        <div class="buttons">
+          <button id="download-dcd" class="btn btn-quiet" type="button" disabled>trajectory .dcd</button>
+          <button id="download-state" class="btn btn-quiet" type="button" disabled>restart .rst7</button>
+          <button id="download-pdb" class="btn btn-quiet" type="button" disabled>frame .pdb</button>
+          <button id="download-metrics" class="btn btn-quiet" type="button" disabled>metrics .csv</button>
+          <button id="download-rmsf" class="btn btn-quiet" type="button" disabled>RMSF .csv</button>
+        </div>
+      </section>
+
+      <section class="card" id="status-panel">
+        <span class="card-title">This machine</span>
+        <dl id="device-report"><dt>WebGPU</dt><dd>checking…</dd></dl>
+      </section>
+    </aside>
+  </div>
+
+  <section class="card caveat">
     <h2>What is actually running</h2>
     <p>The force field, the topology parse, every force term and the integrator
     are validated against OpenMM — per-atom forces agree to 5.2×10⁻⁸. Those

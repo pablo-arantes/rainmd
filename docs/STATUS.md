@@ -71,6 +71,7 @@ Re-run them with `npm run check:openmm`, `npm run check:gradients`,
 | **the restraint pulls towards its reference** | the angle between force and displacement | cosine **−1.0** — `k*d²` is even in `d`, so a sign error leaves every energy comparison exact while pushing the solute away |
 | **the three-stage protocol runs** | headless Chrome, through the page's own buttons | minimise (1000 steps, 10 kJ/mol/nm) → equilibrate (NPT, 33 solute heavy atoms at 500 kJ/mol/nm²) → production; equilibration is locked until minimisation has run |
 | **the restraint visibly holds the solute** | the live four-way RMSD, restrained against free | complex RMSD **0.034 nm restrained against 0.111 free** over the same 4000 steps, binder-on-receptor 0.085 against 0.207 |
+| **the interface follows LocalFold's** | screenshots at 1440 px and 500 px, through the page's own controls | two columns with a tabbed result pane, white cards, capitalised field labels in bordered groups, one filled primary action; single column below 64rem with the structure first; no horizontal scroll at either width |
 | **the ribbon's frame is a valid frame** | the three structure fixtures, guide by guide | side vectors unit length to 1e-5 and perpendicular to the backbone to **1e-5**; consecutive frames never oppose (min dot +0.62 helix, +0.83 strand) |
 | **the flip correction is what stops a strand twisting** | deleting it | the minimum consecutive dot goes from +0.62 to **−0.75**, i.e. the frame reverses — the one ribbon property a still image of a helix cannot show |
 | **a strand ends in an arrowhead, a helix does not** | the width profile along each chain | strand 0.110 nm → base **0.209** → tip **0.012**; helix constant at 0.120; a coil rod is 0.040, under half a helix's width so structure reads without colour |
@@ -129,7 +130,13 @@ line here is deleted when it comes good, never widened.
 
 What remains:
 
-1. **Performance work, which has barely begun.** One measurement so far: a stall
+1. **`web/viewer.js` and `shared/analysis/ribbon.js` are retained but the page
+   no longer loads them.** The WGSL sphere-impostor and cartoon renderer is
+   still gated — its tests and the `probe-ribbon-shader` lane still run — but
+   3Dmol draws the page now. Keeping an unloaded renderer is exactly the trap
+   LocalFold's own notes warn about, so this is a decision waiting to be taken
+   rather than a state to settle into: either it finds a use or it goes.
+2. **Performance work, which has barely begun.** One measurement so far: a stall
    break in SHAKE took a step from 2.40 ms to 1.03 ms, because a tolerance below
    the f32 floor made every cluster run its full iteration cap. Remaining
    candidates are unprofiled: the per-cell insertion sort, the

@@ -695,8 +695,14 @@ try {
     if (payload.viewerAtoms === 0) process.exitCode = 1;
     console.log(`render:  ${payload.renderError === null ? "validated" : payload.renderError}`);
     if (payload.renderError !== null) process.exitCode = 1;
-    if (!payload.log.includes("structure:")) process.exitCode = 1;
-    if (payload.visible === 0) process.exitCode = 1;
+    // 🔴 WHAT 3Dmol PARSED, NOT A LOG LINE THE PAGE NO LONGER WRITES. This
+    // asserted on "structure: N helix / N sheet" from the alpha-carbon
+    // criterion, which went away when 3Dmol took over the assignment - so the
+    // lane failed on a page that was drawing correctly. An assertion on a log
+    // string outlives the code that produced it; an assertion on the model does
+    // not.
+    if (payload.viewerAtoms === 0) process.exitCode = 1;
+    if (payload.chains === 0) process.exitCode = 1;
     await screenshot(socketUrl);
   }
 

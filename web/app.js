@@ -58,11 +58,16 @@ function log(line = "") {
 function describe(list, rows) {
   list.innerHTML = "";
   for (const [term, definition] of rows) {
+    // 🔴 EACH PAIR IN ITS OWN BOX. A flat `dt, dd, dt, dd` list can only be a
+    // two-column grid, so ten pairs are ten rows tall; wrapping each pair makes
+    // the report flow into as many columns as the card is wide.
+    const pair = document.createElement("div");
     const dt = document.createElement("dt");
     dt.textContent = term;
     const dd = document.createElement("dd");
     dd.textContent = definition;
-    list.append(dt, dd);
+    pair.append(dt, dd);
+    list.append(pair);
   }
   list.hidden = false;
 }
@@ -71,12 +76,13 @@ function showLive(rows) {
   const container = element("live");
   container.innerHTML = "";
   for (const [label, value] of rows) {
+    // 🔴 dt/dd, NOT span.label/span.value. The metrics strip is styled as the
+    // reference's pLDDT / pTM / ipTM row - a small grey caption over a bold
+    // tabular number - and that styling keys off the definition-list elements.
     const cell = document.createElement("div");
-    const name = document.createElement("span");
-    name.className = "label";
+    const name = document.createElement("dt");
     name.textContent = label;
-    const text = document.createElement("span");
-    text.className = "value";
+    const text = document.createElement("dd");
     text.textContent = value;
     cell.append(name, text);
     container.append(cell);
@@ -1276,6 +1282,30 @@ function visibleIndices(preset) {
 }
 
 // ------------------------------------------------------------------ view ----
+/**
+ * The result tabs.
+ *
+ * 🔴 THREE VIEWS IN ONE PANE RATHER THAN THREE SCREENS OF SCROLLING, which is
+ * what the reference does with Structure / PAE / Contact. The structure, the six
+ * analysis panels and the log were stacked, so reading the log meant scrolling
+ * the structure off the top. Switching to Analysis also has to redraw the
+ * panels: a canvas sized while its container was `display: none` has a zero
+ * backing store, and the plots came back blank the first time they were shown.
+ */
+for (const tab of document.querySelectorAll(".tab")) {
+  tab.addEventListener("click", () => {
+    const wanted = tab.dataset.pane;
+    for (const other of document.querySelectorAll(".tab")) {
+      other.classList.toggle("is-active", other === tab);
+    }
+    for (const body of document.querySelectorAll(".tab-body")) {
+      body.hidden = body.dataset.body !== wanted;
+    }
+    if (wanted === "analysis") plot?.draw();
+    if (wanted === "structure") viewer?.resize();
+  });
+}
+
 element("binder").addEventListener("change", applyBinderChoice);
 
 for (const control of ["view-preset", "colour-by", "representation"]) {
