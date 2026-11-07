@@ -284,6 +284,56 @@ So the host builds guides and the vertex shader sweeps them procedurally from
 sphere impostors already use, so a structure change rewrites a few hundred
 guides rather than uploading geometry.
 
+## The fourth REA: LogMD, and why it cannot replace this
+
+`github.com/log-md/logmd`, cloned 2026-11-07, read as source. 416 KB, MIT,
+`pip install logmd`. Its pitch is "Share MD While It Runs" and it does that
+well — but it is a *client for a service*, not a library, and that decides it.
+
+**Measured, from the repository:**
+
+- **The viewer is not in it.** No `.js`, `.ts`, `.html`, `.svelte` or `.vue`
+  anywhere. What ships is the uploader; the viewer is a hosted web app at
+  `https://rcsb.ai/{run_id}` whose bundle is served from
+  `logmd.b-cdn.net` and whose CDN refuses programmatic fetches.
+- **Every frame is POSTed to a third party.** `upload_worker_process` sends
+  `{file_contents, run_id, frame_num, token, user_id: token.email, data_dict}`
+  to `https://alexander-mathiasen--logmd-upload-frame.modal.run`. The frame is
+  a PDB string. The token is cached at `~/.logmd_token`.
+- **It is Python.** Its two integration points are an ASE `dyn.attach` and an
+  OpenMM `Reporter` (`describeNextReport` / `report`). RainMD has no Python at
+  runtime; it is a page.
+- **It does not compute analysis.** `data_dict` is whatever scalars the caller's
+  own callback returns, which LogMD then plots. There is no RMSD, Rg or RMSF in
+  it — `shared/analysis/metrics.js` would still have to exist.
+- The hosted page also loads Google Analytics.
+
+🔴 **SO "LIGHTER" IS TRUE AND MISLEADING.** The client is small *because* the
+rendering, the storage and the frame history live on someone else's
+infrastructure. That is not less complexity, it is relocated complexity — onto
+an unversioned private endpoint (`*.modal.run`) this project would then depend
+on.
+
+🔴 **AND IT INVERTS THIS PROJECT'S CENTRAL CLAIM.** The README's first line is
+"No install, no queue, no upload", and the reason this port exists at all is
+that a reader should be able to run MD on their own machine without sending a
+structure anywhere. Adopting LogMD as *the* viewer would mean uploading every
+frame of someone's protein, with their email attached, to a third party — and
+would stop the page working offline.
+
+**What was taken instead.** The idea worth having is streaming frames as they
+are produced, which is LogMD's actual contribution. That is now a control on the
+page — *While running: animate every frame* — off by default because drawing
+every report was measured at 17% of a run, and on when watching the water settle
+during a short equilibration is the point. It renders locally, uploads nothing,
+and works with no network.
+
+**What remains open.** If the complaint behind the suggestion is the quality of
+the drawing rather than the streaming, the honest answer is **Mol\*** — RCSB's
+own viewer, MIT, and the best-looking molecular renderer there is. It can be
+vendored and run locally exactly as 3Dmol is now, at roughly ten times the
+bytes. That is a trade worth making deliberately, not by accident.
+
 ## What was deliberately not copied
 
 LocalFold's per-device tuning-prior system (`webgpu/runtime/device-profile.js`,

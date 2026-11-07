@@ -308,6 +308,11 @@ try {
         // analysis needs at least two frames before RMSF means anything.
         document.getElementById("eq-write").value = "1";
         document.getElementById("eq-restraint").value = "500";
+        // 🔴 ANIMATION ON FOR THE CHECK, OFF BY DEFAULT ON THE PAGE. The live
+        // path updates the viewer's existing model instead of rebuilding it, so
+        // it is the one that can disagree with the simulation about how many
+        // atoms there are - the failure 3Dmol does not raise on its own.
+        document.getElementById("animate").value = "on";
 
         document.getElementById("minimise").click();
         for (let i = 0; i < 120; i += 1) {
@@ -492,6 +497,8 @@ try {
           equilibrateWasLockedBeforeMinimise: equilibrateDisabled,
           produceLockedAfterMinimise: document.getElementById("produce").disabled,
           restrainedAtoms: handle.lastRestrainedAtoms ?? null,
+          animatedAtoms: handle.viewer?.atomCount ?? 0,
+          animateMode: document.getElementById("animate").value,
           viewSwitch,
           binderSwitch,
           binderFrozenDuringRun,
@@ -563,6 +570,9 @@ try {
       if (payload.binderSwitch.length > 1 && shapes.size < 2) process.exitCode = 1;
     }
     console.log(`binder frozen mid-run:       ${payload.binderFrozenDuringRun}`);
+    console.log(`live animation:              mode "${payload.animateMode}", `
+      + `${payload.animatedAtoms} atoms in the viewer after the run`);
+    if (payload.animateMode === "on" && payload.animatedAtoms === 0) process.exitCode = 1;
     console.log(`stage gating:                equilibrate locked before `
       + `minimise: ${payload.equilibrateWasLockedBeforeMinimise}`);
     if (payload.equilibrateWasLockedBeforeMinimise !== false) {

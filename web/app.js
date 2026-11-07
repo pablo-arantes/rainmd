@@ -351,6 +351,43 @@ function runOptions(method) {
 }
 
 /**
+ * Push one frame to the viewer, for the live animation.
+ *
+ * 🔴 NOT IMAGED, DELIBERATELY, WHERE A WRITTEN FRAME IS. Wrapping on the
+ * molecule centroid is right for a file - it is what every analysis tool
+ * expects - and wrong for an animation, because a molecule that crosses a face
+ * jumps a whole box width in one frame. What you want to watch is continuous
+ * motion; what you want to analyse afterwards is wrapped. They are different
+ * requirements and this is the one place they diverge.
+ *
+ * 🔴 AND THE ATOM ORDER IS THE VIEWER'S, NOT THE SYSTEM'S. The viewer holds only
+ * the atoms the current preset shows, in the order `writePdb` emitted them, so
+ * the frame has to be built over the same index list. `setFrame` asserts the
+ * count, which is what turns a mismatch into an error instead of a plausible
+ * structure built from the wrong atoms.
+ */
+function animateFrame(positions) {
+  if (viewer === null || loaded === null) return;
+  const indices = visibleIndices(currentPreset());
+  const list = indices ?? null;
+  const count = list === null ? loaded.topology.atomCount : list.length;
+  const flat = new Float32Array(count * 3);
+  for (let slot = 0; slot < count; slot += 1) {
+    const atom = list === null ? slot : list[slot];
+    flat[slot * 3] = positions[atom * 3] * 10;
+    flat[slot * 3 + 1] = positions[atom * 3 + 1] * 10;
+    flat[slot * 3 + 2] = positions[atom * 3 + 2] * 10;
+  }
+  try {
+    viewer.setFrame(flat);
+  } catch (error) {
+    // A count mismatch means the preset changed under the run; redraw whole.
+    log(`  viewer: ${error.message}`);
+    showCheckpoint();
+  }
+}
+
+/**
  * Draw the structure at a named moment, rather than every reporting frame.
  *
  * 🔴 THREE MOMENTS ARE WORTH A PICTURE AND A LIVE ANIMATION IS NOT ONE OF THEM:
@@ -1101,10 +1138,12 @@ async function runOnDevice(stageConfig = {}) {
         extra.push(["density", `${densityOf(system, energy.volume).toFixed(4)} g/cm³`]);
       }
       report(row, extra);
-      // 🔴 NO VIEWER WORK HERE - see `showCheckpoint`. The analysis panels are
-      // cheap and are the thing worth watching while a run is going; redrawing
-      // the structure is not, and in a cartoon mode it rebuilt the whole ribbon
-      // every report.
+      // 🔴 OFF BY DEFAULT, AND THE CONTROL SAYS WHAT IT COSTS. Drawing every
+      // report was measured at 17% of a run on the two-body fixture, which on a
+      // multi-hour production stage is an hour nobody is watching. It is worth
+      // having for a short equilibration, where seeing the water settle is the
+      // point - so it is a choice rather than a default.
+      if (element("animate").value === "on") animateFrame(lastPositions);
       if (writer !== null) writer.appendFrame(lastPositions, system.boxVectors);
       element("download-pdb").disabled = false;
       element("download-metrics").disabled = false;
