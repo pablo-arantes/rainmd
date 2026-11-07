@@ -128,3 +128,93 @@ button#stop, button#check-gpu { background: transparent; color: var(--accent); }
   flex-wrap: wrap;
 }
 .example-row select { flex: 1 1 22rem; min-width: 0; }
+
+/* 🔴 A DIV WITH AN EXPLICIT HEIGHT AND `position: relative`. 3Dmol absolutely
+   positions its canvas inside the container and measures clientHeight at
+   creation - a container with no height gives a zero-sized canvas and a blank
+   viewer with no error anywhere. */
+.viewer {
+  position: relative; width: 100%; height: 460px;
+  border: 1px solid var(--line); border-radius: 8px;
+  background: #0e0f13; overflow: hidden;
+}
+.viewer canvas { display: block; }
+
+/* ------------------------------------------------------------- workspace ----
+ * 🔴 THE VIEWER WAS BELOW EVERY CONTROL, WHICH IS THE WHOLE COMPLAINT. One
+ * 60rem column with the settings, three stages and five export buttons stacked
+ * above it put the structure - the thing someone actually looks at - a full
+ * screen down, and the analysis panels a screen below that. LocalFold puts its
+ * controls in a sidebar and gives the rest to the viewer; this does the same.
+ *
+ * 🔴 AND THE VIEWER COLUMN IS STICKY, so scrolling the log or the panels does
+ * not scroll the structure out of sight. `align-self: start` is what lets it
+ * be: a grid item stretches by default and a stretched item cannot stick.
+ */
+main { max-width: 84rem; }
+.workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 23rem) minmax(0, 1fr);
+  gap: 22px;
+  align-items: start;
+}
+.column-controls { min-width: 0; }
+.column-view { min-width: 0; position: sticky; top: 14px; align-self: start; }
+
+/* One column below the width where two would squeeze the viewer, and the
+   structure comes FIRST there - a phone should not have to scroll past the
+   controls to see what it loaded. */
+@media (max-width: 62rem) {
+  main { max-width: 60rem; }
+  .workspace { grid-template-columns: minmax(0, 1fr); }
+  .column-view { position: static; order: -1; }
+}
+
+/* The stages read as steps, not as a wall of fields. */
+.column-controls h3 {
+  margin: 20px 0 8px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+  font-size: 0.98rem;
+  letter-spacing: 0.01em;
+}
+.column-controls h3:first-of-type { border-top: 0; padding-top: 0; margin-top: 10px; }
+.column-controls h3 .hint { font-weight: 400; }
+.controls { display: grid; gap: 8px 14px; grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr)); }
+.controls label { display: flex; flex-direction: column; gap: 3px; font-size: 0.85rem; color: var(--muted); }
+.controls input, .controls select { font: inherit; padding: 5px 7px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--ink); }
+.controls .hint { grid-column: 1 / -1; margin: 2px 0 0; }
+.buttons { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 0; }
+.live { display: grid; grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr)); gap: 6px 12px; margin: 0 0 12px; }
+
+/* 🔴 THE INTRO COLLAPSES ONCE THERE IS A SYSTEM. Before a load the drop-zone
+   copy and the example list are the most useful things on the page; after one
+   they are 500 px of scrolling between the reader and the structure they just
+   loaded, which is what put the viewer a screen down. */
+body.loaded .pre-load-only { display: none; }
+body.loaded #status-panel { padding: 10px 20px; }
+body.loaded #status-panel h2 { font-size: 0.95rem; margin: 0 0 4px; }
+body.loaded .viewer-note { display: none; }
+
+/* 🔴 THE REPORTS WRAP INTO COLUMNS RATHER THAN RUNNING DOWN THE PAGE. Ten
+   label/value pairs in a single `max-content 1fr` grid is ten rows tall, and
+   with two of those stacked above the workspace the structure started a screen
+   down. Repeating the pair across as many columns as fit turns each report
+   into two or three rows without losing anything. */
+#system-report, #device-report {
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+  gap: 2px 18px;
+  font-size: 0.86rem;
+}
+#system-report > div, #device-report > div { display: flex; gap: 8px; }
+#system-report dt, #device-report dt { min-width: 9rem; }
+/* The pairs are siblings, so each dt+dd needs to sit on one line: subgrid is
+   the clean way and is widely supported now. */
+#system-report, #device-report { grid-auto-flow: row dense; }
+#system-report dt, #device-report dt { grid-column: auto; }
+
+/* 🔴 `hidden` LOSES TO `display: grid`, WHICH IS WHY THE EMPTY PANELS STILL
+   SHOWED. The attribute works through a UA rule of `display: none`, and any
+   author rule setting display beats it. Every element in this sheet that both
+   carries `hidden` and sets `display` needs this. */
+.panels[hidden], .example-row[hidden], [hidden] { display: none !important; }

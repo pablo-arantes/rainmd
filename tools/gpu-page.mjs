@@ -168,6 +168,17 @@ if (remoteArg === undefined) {
 const chrome = spawn(chromePath, [
   "--headless=new",
   `--remote-debugging-port=${DEBUG_PORT}`,
+  // 🔴 THE WINDOW SIZE IS A LAUNCH FLAG, NOT A CDP OVERRIDE. `cdp()` opens a
+  // socket per call and closes it, and an Emulation override lives for the
+  // SESSION - so setting device metrics in one call and evaluating in the next
+  // silently measured the default width. The layout lane reported 1200 px
+  // whether it was asked for 1440 or 430, which reads as a page that ignores
+  // its media queries and was the harness throwing the override away.
+  // 2400 tall by default so a whole-page screenshot fits without scrolling.
+  `--window-size=${(() => {
+    const argument = process.argv.find((value) => value.startsWith("--width="));
+    return argument === undefined ? 1200 : Number(argument.slice("--width=".length));
+  })()},2400`,
   // 🔴 A FRESH PROFILE PER RUN. Chrome writes extension storage into the
   // profile with permissions the launching user cannot always remove, so a
   // fixed path accumulates undeletable directories and the next run inherits
@@ -176,7 +187,6 @@ const chrome = spawn(chromePath, [
   "--enable-unsafe-webgpu",
   "--no-first-run",
   "--disable-gpu-sandbox",
-  "--window-size=1200,2400",
   // 🔴 `--url=` POINTS THIS AT A DEPLOYED PAGE, which is the only way to check
   // the thing a visitor actually gets. Everything else here is served by
   // tools/serve.py from the working tree, so it validates the code on disk and
@@ -410,15 +420,18 @@ try {
             try {
               colour.value = mode;
               colour.dispatchEvent(new Event("change"));
-              await wait(250);
-              window.rainmd.device.pushErrorScope("validation");
-              window.rainmd.viewer.draw();
-              const raised = await window.rainmd.device.popErrorScope();
-              error = raised === null ? null : raised.message;
+              await wait(350);
+              // 🔴 WHAT 3Dmol PARSED, NOT A DEVICE ERROR SCOPE. The viewer owns
+              // its own WebGL context now, so the simulation's WebGPU device
+              // can say nothing about whether the structure drew. The atom
+              // count is the checkable thing - and it is where the one bug that
+              // matters hides, a parser silently dropping every hydrogen.
+              const atoms = window.rainmd.viewer?.atomCount ?? 0;
+              if (atoms === 0) error = "3Dmol parsed no atoms";
             } catch (thrown) {
               error = String(thrown && thrown.message || thrown);
             }
-            colourModes.push({ mode, error });
+            colourModes.push({ mode, error, atoms: window.rainmd.viewer?.atomCount ?? 0 });
           }
         }
         const colourError = colourModes.find((m) => m.error !== null)?.error ?? null;
@@ -436,15 +449,13 @@ try {
             try {
               representation.value = mode;
               representation.dispatchEvent(new Event("change"));
-              await wait(300);
-              window.rainmd.device.pushErrorScope("validation");
-              window.rainmd.viewer.draw();
-              const raised = await window.rainmd.device.popErrorScope();
-              error = raised === null ? null : raised.message;
+              await wait(400);
+              const atoms = window.rainmd.viewer?.atomCount ?? 0;
+              if (atoms === 0) error = "3Dmol parsed no atoms";
             } catch (thrown) {
               error = String(thrown && thrown.message || thrown);
             }
-            drawModes.push({ mode, error, segments: window.rainmd.viewer?.ribbonSegments ?? 0 });
+            drawModes.push({ mode, error, atoms: window.rainmd.viewer?.atomCount ?? 0 });
           }
         }
 
@@ -452,11 +463,8 @@ try {
         // size mismatch shows up here and nowhere in the DOM.
         let renderError = null;
         const handle = window.rainmd;
-        if (handle.device && handle.viewer) {
-          handle.device.pushErrorScope("validation");
-          handle.viewer.draw();
-          const error = await handle.device.popErrorScope();
-          renderError = error === null ? null : error.message;
+        if (handle.viewer !== null && (handle.viewer?.atomCount ?? 0) === 0) {
+          renderError = "the viewer holds no atoms";
         }
         const analysis = handle.analysis;
         const last = analysis?.series?.[analysis.series.length - 1] ?? null;
@@ -564,7 +572,7 @@ try {
     }
     if (payload.binderFrozenDuringRun !== true) process.exitCode = 1;
     console.log(`draw modes:                  `
-      + payload.drawModes.map((m) => `${m.mode}(${m.segments} seg)`
+      + payload.drawModes.map((m) => `${m.mode}(${m.atoms} atoms)`
         + `${m.error === null ? "" : " FAILED"}`).join(", "));
     for (const mode of payload.drawModes) {
       if (mode.error !== null) {
@@ -572,7 +580,7 @@ try {
         process.exitCode = 1;
       }
       // A ribbon mode that builds no segments is a cartoon nobody can see.
-      if (mode.mode !== "spheres" && mode.segments === 0) process.exitCode = 1;
+      if (mode.atoms === 0) process.exitCode = 1;
     }
     console.log(`colour modes:                `
       + payload.colourModes.map((m) => `${m.mode}${m.error === null ? " ok" : " FAILED"}`)
@@ -641,21 +649,24 @@ try {
         // from a ribbon that failed to build - the strand fixture lands exactly
         // that way on the default camera, because its broad face lies in the
         // sheet plane and the sheet plane faces the lens.
-        if (handle.viewer && "AZIMUTH" !== "") {
-          handle.viewer.azimuth = Number("AZIMUTH");
-          handle.viewer.elevation = Number("ELEVATION");
-        }
-        if (handle.device && handle.viewer) {
-          handle.device.pushErrorScope("validation");
-          handle.viewer.draw();
-          const raised = await handle.device.popErrorScope();
-          renderError = raised === null ? null : raised.message;
+        // 🔴 NO WEBGPU ERROR SCOPE HERE ANY MORE. 3Dmol owns a WebGL context
+        // of its own, so a device error scope on the simulation's WebGPU device
+        // can say nothing about whether the structure drew. What IS checkable
+        // is the model: how many atoms it parsed and how many chains it found,
+        // which is also where the one bug that matters hides - a parser that
+        // silently drops every hydrogen.
+        if ("AZIMUTH" !== "") {
+          try {
+            handle.viewer?.viewer?.rotate?.(Number("AZIMUTH") * 57.2958, "y");
+            handle.viewer?.viewer?.rotate?.(Number("ELEVATION") * 57.2958, "x");
+            handle.viewer?.viewer?.render?.();
+          } catch (error) { renderError = String(error.message ?? error); }
         }
         return JSON.stringify({
           log: document.getElementById("log").textContent,
           visible: handle.viewer?.visibleCount ?? 0,
-          ribbonSegments: handle.viewer?.ribbonSegments ?? 0,
-          representation: handle.viewer?.representation ?? "?",
+          chains: handle.viewer?.chains?.length ?? 0,
+          viewerAtoms: handle.viewer?.atomCount ?? 0,
           renderError,
         });
       })()`;
@@ -679,11 +690,9 @@ try {
     const payload = JSON.parse(cdpValue(result, `--view=${name}`));
     console.log(`\n--- ${name} ---`);
     console.log(payload.log.trim());
-    console.log(`visible: ${payload.visible} atoms, `
-      + `${payload.ribbonSegments} ribbon segments, drawing "${payload.representation}"`);
-    if (payload.representation !== "spheres" && payload.ribbonSegments === 0) {
-      process.exitCode = 1;
-    }
+    console.log(`viewer: ${payload.viewerAtoms} atoms parsed by 3Dmol, `
+      + `${payload.chains} chain(s)`);
+    if (payload.viewerAtoms === 0) process.exitCode = 1;
     console.log(`render:  ${payload.renderError === null ? "validated" : payload.renderError}`);
     if (payload.renderError !== null) process.exitCode = 1;
     if (!payload.log.includes("structure:")) process.exitCode = 1;
@@ -730,6 +739,79 @@ try {
         + `${row.error === null ? row.log : `FAILED: ${row.error}`}`);
       if (row.error !== null || row.atoms === 0 || !row.finished) process.exitCode = 1;
     }
+  }
+
+  if (process.argv.includes("--probe-3dmol")) {
+    const expression = `(async () => {
+        const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+        const [top, crd] = await Promise.all([
+          fetch("test/fixtures/mixed.prmtop").then((r) => r.text()),
+          fetch("test/fixtures/mixed.inpcrd").then((r) => r.text()),
+        ]);
+        const files = new DataTransfer();
+        files.items.add(new File([top], "mixed.prmtop"));
+        files.items.add(new File([crd], "mixed.inpcrd"));
+        const input = document.getElementById("file-input");
+        input.files = files.files;
+        input.dispatchEvent(new Event("change"));
+        await wait(1500);
+        const model = window.rainmd.viewer.model;
+        const atoms = model.selectedAtoms({});
+        const ss = {};
+        for (const atom of atoms) { ss[atom.ss ?? "none"] = (ss[atom.ss ?? "none"] ?? 0) + 1; }
+        return JSON.stringify({
+          schemes: Object.keys(window.$3Dmol.builtinColorSchemes ?? {}),
+          ssColors: Object.keys(window.$3Dmol.ssColors ?? {}),
+          secondaryStructure: ss,
+          sampleAtom: { resn: atoms[20]?.resn, ss: atoms[20]?.ss, chain: atoms[20]?.chain },
+        });
+      })()`;
+    const evaluation = await cdp(socketUrl, "Runtime.evaluate", {
+      expression, awaitPromise: true, returnByValue: true,
+    });
+    console.log(cdpValue(evaluation, "--probe-3dmol"));
+  }
+
+  // A whole-page screenshot at a chosen width, for looking at the layout.
+  if (process.argv.includes("--layout")) {
+    const expression = `(async () => {
+        const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+        const [top, crd] = await Promise.all([
+          fetch("test/fixtures/two-body.prmtop").then((r) => r.text()),
+          fetch("test/fixtures/two-body.inpcrd").then((r) => r.text()),
+        ]);
+        const files = new DataTransfer();
+        files.items.add(new File([top], "two-body.prmtop"));
+        files.items.add(new File([crd], "two-body.inpcrd"));
+        const input = document.getElementById("file-input");
+        input.files = files.files;
+        input.dispatchEvent(new Event("change"));
+        await wait(2000);
+        window.scrollTo(0, 0);
+        const panel = document.getElementById("run-panel").getBoundingClientRect();
+        const viewer = document.getElementById("viewer").getBoundingClientRect();
+        return JSON.stringify({
+          pageWidth: document.documentElement.clientWidth,
+          viewerTop: Math.round(viewer.top + window.scrollY),
+          viewerWidth: Math.round(viewer.width),
+          panelWidth: Math.round(panel.width),
+          horizontalScroll: document.documentElement.scrollWidth
+            > document.documentElement.clientWidth + 1,
+        });
+      })()`;
+    const evaluation = await cdp(socketUrl, "Runtime.evaluate", {
+      expression, awaitPromise: true, returnByValue: true,
+    });
+    const payload = JSON.parse(cdpValue(evaluation, "--layout"));
+    console.log(`layout at ${payload.pageWidth}px: viewer is ${payload.viewerWidth}px wide, `
+      + `its top edge ${payload.viewerTop}px down the page`);
+    // 🔴 THE NUMBER THAT WAS THE COMPLAINT. With everything in one column the
+    // structure started roughly a screen down; it should now be near the top.
+    if (payload.horizontalScroll) {
+      console.log("  FAILED: the page scrolls horizontally");
+      process.exitCode = 1;
+    }
+    await screenshot(socketUrl);
   }
 
   const moduleArg = process.argv.find((argument) => argument.startsWith("--module="));

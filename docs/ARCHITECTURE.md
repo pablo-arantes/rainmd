@@ -124,11 +124,24 @@ agreement f32 cannot give. It is also, incidentally, a quantitative argument for
 why `constraints=HBonds` is standard: it removes exactly the stiffest springs
 from the harmonic term, 1185 bonds down to 9 on this system.
 
-**Positions must not be wrapped into the box during a run.** OpenMM's bonded
-forces are not periodic, so a molecule has to stay whole in the coordinate
-array; wrapping would split one across the boundary and stretch a bond across
-the whole cell. Imaging is applied when a frame is written, never to the running
-state.
+**Positions must not be wrapped into the box during a run, but they must be
+wrapped when a frame is written.** OpenMM's bonded forces are not periodic, so a
+molecule has to stay whole in the coordinate array; wrapping the running state
+would split one across the boundary and stretch a bond across the whole cell.
+
+🔴 **THIS PARAGRAPH USED TO CLAIM BOTH HALVES AND ONLY THE SECOND WAS TRUE.**
+The imaging on write was never implemented, so every trajectory this port
+produced carried unwrapped coordinates — and because water diffuses freely, the
+solvent drifts further from the solute the longer the run goes. Opened in VMD it
+looks exactly like the waters are flying away from the protein, which is how a
+reader found it. The physics was never affected: the nonbonded and PME paths
+agree with OpenMM to 1.4e-6 and use the minimum image throughout. The *file* was
+simply not what any other tool writes — OpenMM's own `DCDReporter` wraps by
+default, so the notebooks' trajectories are wrapped and this port's were not.
+Measured against it: 393 of 393 molecule *centroids* inside the cell against 387
+of 393 first atoms, so the reference point is the centroid and single atoms are
+allowed to stick out by up to a bond length. `shared/traj/imaging.js` now does
+that for both the DCD and the PDB writers.
 
 ## The second target: JIGGLE's interface
 

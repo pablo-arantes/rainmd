@@ -8,6 +8,7 @@
  * against the same `.prmtop`, with no RainMD code involved on the reading side.
  */
 import { writeFileSync } from "node:fs";
+import { moleculesOf } from "../../shared/traj/imaging.js";
 import { readFixture } from "./fixture.js";
 import { parsePrmtop } from "../../shared/amber/prmtop.js";
 import { parseInpcrd } from "../../shared/amber/inpcrd.js";
@@ -45,6 +46,7 @@ export async function main(device, args = []) {
     await simulation.initialise();
 
     const writer = new DcdWriter({
+        molecules: moleculesOf(topology),
       atomCount: topology.atomCount, timestep: options.timestep,
       interval, periodic: true, title: "RainMD ala-wat",
     });

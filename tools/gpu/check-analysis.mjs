@@ -13,6 +13,7 @@
  * is a statement about the running-sums identity rather than about arithmetic.
  */
 import { readFixture } from "./fixture.js";
+import { moleculesOf } from "../../shared/traj/imaging.js";
 
 /**
  * 🔴 WRITTEN ONLY WHERE THERE IS A FILESYSTEM, AND THE IMPORT IS DYNAMIC FOR
@@ -75,6 +76,7 @@ export async function main(device, args = []) {
     // selection. The METRICS use the solute alone; the trajectory does not have
     // to make that choice for whoever reads it later.
     const writer = new DcdWriter({
+        molecules: moleculesOf(topology),
       atomCount: topology.atomCount, timestep: 0.002, interval,
       periodic: true, title: `RainMD ${fixture}`,
     });

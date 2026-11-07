@@ -8,6 +8,7 @@
  * available for comparison, and every log line names the path it took.
  */
 import { parsePrmtop } from "../shared/amber/prmtop.js";
+import { moleculesOf } from "../shared/traj/imaging.js";
 import { parseInpcrd } from "../shared/amber/inpcrd.js";
 import { buildSystem } from "../shared/topology/system.js";
 import { DcdWriter } from "../shared/traj/dcd.js";
@@ -21,10 +22,8 @@ import {
   langevinStep, langevinFinishStep, instantaneousTemperature,
 } from "../cpu/integrate/langevin.js";
 import { Panel, PanelStack } from "./plot.js";
-import { StructureViewer } from "./viewer.js";
+import { MolViewer } from "./mol-viewer.js";
 import { buildSelections, VIEW_PRESETS, BODY_COLOURS } from "../shared/analysis/selection.js";
-import { secondaryOfAtoms } from "../shared/analysis/secondary.js";
-import { buildRibbon } from "../shared/analysis/ribbon.js";
 import { soluteHeavyAtoms } from "../shared/topology/restraints.js";
 import { LiveAnalysis } from "../shared/analysis/metrics.js";
 import { writePdb } from "../shared/traj/pdb.js";
@@ -239,6 +238,8 @@ async function loadFiles(files) {
         : `${selections.receptor.length} / ${selections.binder.length} `
           + `(${selections.soluteMoleculeCount} solute molecules)`],
     ]);
+    // Collapse the intro: see the `.pre-load-only` rules.
+    document.body.classList.add("loaded");
     populateBinders();
     populatePresets();
     element("representation").value = defaultRepresentation();
@@ -314,8 +315,6 @@ function showCheckpoint(what) {
   const positions = lastPositions ?? hostState?.positions
     ?? loaded.coordinates.positions;
   applyView(viewer, { topology: loaded.topology }, positions);
-  viewer.upload(positions);
-  viewer.draw();
   if (what !== undefined) log(`  viewer: showing the structure ${what}`);
 }
 
@@ -327,19 +326,35 @@ function showLoadedStructure() {
   // 🔴 ITS OWN BUFFER, UPLOADED FROM THE HOST. There is no simulation yet, so
   // there is no device buffer to copy from - `setStructure` has already sized
   // the viewer's own positions buffer, and this fills it.
-  // No frame() call here: `setStructure` already framed on the visible atoms,
-  // and `frame` takes the styles array it built - calling it with one argument
-  // throws on `styles[...]`, which the load handler's catch then swallows into
-  // a blank log and a null `loaded`.
-  view.upload(loaded.coordinates.positions);
-  view.draw();
+  // `setStructure` parses, styles and zooms; there is nothing further to push.
 }
 
 function ensureViewer() {
-  if (viewer === null && gpu !== null) {
-    viewer = new StructureViewer(gpu.device, element("viewer"));
+  if (viewer === null) {
+    try {
+      viewer = new MolViewer(element("viewer"));
+    } catch (error) {
+      log(`viewer: ${error.message}`);
+      return null;
+    }
   }
   return viewer;
+}
+
+/**
+ * The atoms the current preset shows, as a PDB for the viewer.
+ *
+ * 🔴 A PDB PER CHECKPOINT, NOT PER FRAME. Three strings over a whole run, so
+ * the cost of building one is irrelevant - which is the trade that made a
+ * library viewer the right answer here. `writePdb` images the frame and gives
+ * each molecule its own chain letter, both of which the cartoon needs.
+ */
+function viewerPdb(preset) {
+  const indices = visibleIndices(preset);
+  const positions = lastPositions ?? hostState?.positions
+    ?? loaded.coordinates.positions;
+  return writePdb({ topology: loaded.topology, boxVectors: selectionSystem?.boxVectors ?? null },
+    positions, { indices, box: loaded.coordinates.box });
 }
 
 /**
@@ -432,7 +447,6 @@ function applyBinderChoice() {
   if (viewer !== null) {
     applyView(viewer, { topology: loaded.topology },
       lastPositions ?? hostState?.positions ?? loaded.coordinates.positions);
-    viewer.draw();
   }
 }
 
@@ -467,7 +481,7 @@ function defaultRepresentation() {
   if (selections === null) return "spheres";
   const backbone = selections.counts.alphaCarbon ?? 0;
   if (backbone < 4) return "spheres";
-  return selections.counts.ligand > 0 ? "both" : "ribbon";
+  return selections.counts.ligand > 0 ? "both" : "cartoon";
 }
 
 function currentPreset() {
@@ -497,6 +511,10 @@ function report(row, extra = []) {
   }
   showLive([...tiles, ...extra]);
   const stack = ensurePlot();
+  // 🔴 HIDDEN UNTIL THERE IS SOMETHING IN THEM. Six empty black rectangles
+  // below the structure read as a viewer that failed, not as plots waiting for
+  // data - and they were on screen from the moment a file loaded.
+  element("panels").hidden = false;
   stack.push(row);
   if (analysis !== null) stack.setBars("rmsf", analysis.rmsf.values());
   stack.draw();
@@ -584,8 +602,7 @@ element("minimise").addEventListener("click", async () => {
         hostState = { positions: Float64Array.from(state.positions),
           velocities: null, step: 0 };
         if (viewer !== null) {
-          viewer.updateFrom(simulation.resources.positions);
-          viewer.draw();
+
         }
       } finally {
         simulation.release();
@@ -638,68 +655,29 @@ element("minimise").addEventListener("click", async () => {
  * without costing anything measurable.
  */
 function attachViewer(simulation, system) {
-  const view = ensureViewer();
-  if (view === null) return;
-  applyView(view, system, hostState?.positions ?? loaded.coordinates.positions);
-  view.updateFrom(simulation.resources.positions);
-  view.draw();
+  // 🔴 NOTHING IS BOUND ANY MORE. This used to hand the viewer the
+  // simulation's own GPU position buffer so a redraw cost no readback; with the
+  // structure drawn at three checkpoints the readback is irrelevant and the
+  // viewer is a library that wants a PDB. Kept as a named call so the two
+  // places that start a stage still say "show me the system".
+  if (ensureViewer() === null) return;
+  showCheckpoint("as this stage starts");
 }
 
 function applyView(view, system, positions) {
   const preset = currentPreset();
   const colourBy = element("colour-by").value;
   const representation = element("representation").value;
-  // 🔴 ASSIGNED FROM THE FRAME BEING DRAWN, not once at load. Secondary
-  // structure is the one colouring that CHANGES during a run - watching a helix
-  // fray is the point of having it - so it is recomputed whenever the view is
-  // rebuilt. It costs a pass over the alpha carbons, one per residue, which is
-  // three orders of magnitude smaller than the atom count it colours.
-  // 🔴 THE RIBBON NEEDS THE ASSIGNMENT WHATEVER THE COLOUR MODE IS. A cartoon
-  // whose widths did not follow the structure would be a tube, so the
-  // assignment is computed whenever either the colouring or the representation
-  // asks for it - not only when the colour dropdown says "structure".
-  const wantsRibbon = representation !== "spheres";
-  const secondary = (colourBy === "structure" || wantsRibbon) && selections !== null
-    ? secondaryOfAtoms({ topology: system.topology }, positions, selections)
-    : null;
-  view.setStructure(system.topology, {
-    selections,
-    groups: preset.groups,
-    heavyOnly: preset.heavyOnly === true,
-    colourBy,
-    secondary: secondary?.perAtom,
-    // 🔴 THIN ATOMS BESIDE A RIBBON, OR THE RIBBON IS INVISIBLE. A van der
-    // Waals sphere is 0.11 to 0.17 nm and the ribbon is 0.12 nm half-width, so
-    // at full radius the atoms swallow the cartoon completely - "ribbon +
-    // atoms" drew exactly the same picture as "atoms". This is why PyMOL pairs
-    // a cartoon with STICKS rather than spheres.
-    radiusScale: representation === "both" ? 0.22 : 0.65,
-    box: loaded.coordinates.box,
-    positions,
-  });
-  view.representation = representation;
-  if (wantsRibbon && secondary !== null) {
-    // The ribbon follows the view: hiding a chain or a ligand must break the
-    // ribbon there rather than draw it across the gap. `visibleAtoms` is the
-    // same flag array the styles buffer was built from.
-    const ribbon = buildRibbon(system.topology, positions, selections, secondary,
-      { visible: view.visibleAtoms });
-    view.setRibbon(ribbon);
-    log(`ribbon: ${ribbon.guideCount} guides in ${ribbon.runCount} chain run(s), `
-      + `${ribbon.segmentCount} segments`);
-  } else {
-    view.setRibbon({ guides: new Float32Array(0), segments: new Uint32Array(0),
-      segmentCount: 0, guideCount: 0, runCount: 0 });
-  }
-  if (secondary !== null) {
-    log(`structure: ${secondary.counts.helix} helix / ${secondary.counts.sheet} sheet / `
-      + `${secondary.counts.coil} coil residues (alpha-carbon geometry, not DSSP)`);
-  }
-  const shown = preset.groups.reduce(
-    (total, name) => total + (selections.counts[name] ?? 0), 0);
+  const indices = visibleIndices(preset);
+  const pdb = writePdb({ topology: system.topology,
+    boxVectors: selectionSystem?.boxVectors ?? null },
+    positions, { indices, box: loaded.coordinates.box });
+  view.setStructure(pdb, { colourBy, representation });
+  const shown = indices === null ? system.topology.atomCount : indices.length;
   element("view-counts").textContent =
     `${shown.toLocaleString()} of ${system.topology.atomCount.toLocaleString()} atoms drawn`
-    + (preset.heavyOnly === true ? ", hydrogens hidden" : "");
+    + (preset.heavyOnly === true ? ", hydrogens hidden" : "")
+    + ` · ${view.chains.length} chain(s)`;
 }
 
 /**
@@ -1008,6 +986,7 @@ async function runOnDevice(stageConfig = {}) {
 
     const writer = trajectoryInterval > 0
       ? new DcdWriter({
+        molecules: moleculesOf(system.topology),
         atomCount: system.topology.atomCount,
         timestep: options.timestep,
         interval: trajectoryInterval,
@@ -1236,7 +1215,6 @@ for (const control of ["view-preset", "colour-by", "representation"]) {
     // must not re-run `buildSystem` over every exclusion in the box.
     applyView(viewer, { topology: loaded.topology },
       lastPositions ?? hostState?.positions ?? loaded.coordinates.positions);
-    viewer.draw();
   });
 }
 
@@ -1276,7 +1254,7 @@ element("download-rmsf").addEventListener("click", () => {
     + `${analysis.rmsf.frames} frames`);
 });
 
-window.addEventListener("resize", () => { plot?.draw(); viewer?.draw(); });
+window.addEventListener("resize", () => { plot?.draw(); viewer?.resize(); });
 
 /**
  * A debugging handle.

@@ -29,6 +29,7 @@ import {
   assignSecondary, secondaryOfAtoms, HELIX, SHEET, COIL,
 } from "../shared/analysis/secondary.js";
 import { buildRibbon, GUIDE_FLOATS } from "../shared/analysis/ribbon.js";
+import { imageMolecules, moleculesOf } from "../shared/traj/imaging.js";
 import { parsePrmtop } from "../shared/amber/prmtop.js";
 import { parseInpcrd } from "../shared/amber/inpcrd.js";
 import { buildSystem } from "../shared/topology/system.js";
@@ -260,6 +261,78 @@ test("secondaryOfAtoms spreads a residue's assignment to all its atoms", () => {
   assert.equal(result.breaks.length, 1, "two peptide chains, one break");
   assert.equal(result.counts.helix + result.counts.sheet + result.counts.coil,
     result.perResidue.length);
+});
+
+// ----------------------------------------------------------------- imaging ----
+
+test("a written frame is wrapped into the cell, with molecules kept whole", () => {
+  // 🔴 THE REGRESSION THIS EXISTS FOR WAS FOUND BY A READER, NOT BY A GATE.
+  // `docs/ARCHITECTURE.md` claimed imaging happened on write; it did not, so
+  // every trajectory carried the integrator's unwrapped coordinates and the
+  // solvent spread further from the solute the longer the run went. Nothing
+  // here could see it, because every energy and force comparison uses the
+  // minimum image and was correct.
+  const { system, coordinates } = loadFixture("two-body");
+  const box = system.boxVectors;
+  const drifted = Float64Array.from(coordinates.positions);
+  // Push three whole molecules a box length out, the way diffusion would over
+  // a long run - by molecule, so the input is a legitimate unwrapped state.
+  const moved = new Set([1, 2, 3]);
+  for (let atom = 0; atom < system.topology.atomCount; atom += 1) {
+    if (!moved.has(system.topology.moleculeOfAtom[atom])) continue;
+    drifted[atom * 3] += box[0] * 2;
+    drifted[atom * 3 + 1] -= box[4];
+    drifted[atom * 3 + 2] += box[8] * 3;
+  }
+  const wrapped = imageMolecules(drifted, box,
+    moleculesOf(system.topology));
+
+  // Every molecule's centroid must land inside the cell - the reference point
+  // OpenMM uses, measured against its own DCDReporter.
+  const sums = new Float64Array(system.topology.moleculeCount * 3);
+  const sizes = new Float64Array(system.topology.moleculeCount);
+  for (let atom = 0; atom < system.topology.atomCount; atom += 1) {
+    const molecule = system.topology.moleculeOfAtom[atom];
+    for (let axis = 0; axis < 3; axis += 1) {
+      sums[molecule * 3 + axis] += wrapped[atom * 3 + axis];
+    }
+    sizes[molecule] += 1;
+  }
+  for (let molecule = 0; molecule < system.topology.moleculeCount; molecule += 1) {
+    if (sizes[molecule] === 0) continue;
+    const z = sums[molecule * 3 + 2] / sizes[molecule];
+    const y = sums[molecule * 3 + 1] / sizes[molecule];
+    const x = sums[molecule * 3] / sizes[molecule];
+    assert.ok(z >= -1e-9 && z < box[8] + 1e-9, `molecule ${molecule} centroid z ${z}`);
+    assert.ok(y >= -1e-9 && y < box[4] + 1e-9, `molecule ${molecule} centroid y ${y}`);
+    assert.ok(x >= -1e-9 && x < box[0] + 1e-9, `molecule ${molecule} centroid x ${x}`);
+  }
+
+  // 🔴 AND EVERY BOND MUST SURVIVE. Wrapping per ATOM is the obvious
+  // implementation and would put a water's oxygen at one face and a hydrogen
+  // at the other - a bond drawn across the whole box. This is the assertion
+  // that tells the two apart; the centroid check above passes either way.
+  const bonds = system.topology.bonds;
+  let worst = 0;
+  for (let index = 0; index < bonds.count; index += 1) {
+    const a = bonds.atomA[index];
+    const b = bonds.atomB[index];
+    const length = Math.hypot(
+      wrapped[a * 3] - wrapped[b * 3],
+      wrapped[a * 3 + 1] - wrapped[b * 3 + 1],
+      wrapped[a * 3 + 2] - wrapped[b * 3 + 2]);
+    worst = Math.max(worst, length);
+  }
+  assert.ok(worst < 0.25, `longest bond after wrapping is ${worst.toFixed(4)} nm`);
+
+  // A molecule already inside must not move at all.
+  const untouched = imageMolecules(coordinates.positions, box,
+    moleculesOf(system.topology));
+  let drift = 0;
+  for (let index = 0; index < untouched.length; index += 1) {
+    drift = Math.max(drift, Math.abs(untouched[index] - coordinates.positions[index]));
+  }
+  assert.ok(drift < 1e-12, `an in-cell structure moved by ${drift}`);
 });
 
 // ------------------------------------------------------------------ ribbon ----

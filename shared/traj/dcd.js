@@ -47,6 +47,7 @@
  * as chunks and the header is written when the trajectory is finished. That is
  * also why `finish()` rather than a stream.
  */
+import { imageMolecules } from "./imaging.js";
 
 /** One AKMA time unit, in picoseconds. */
 const AKMA_PICOSECONDS = 0.04888821;
@@ -69,6 +70,14 @@ export class DcdWriter {
     this.timestep = options.timestep;
     this.interval = options.interval;
     this.periodic = options.periodic === true;
+    // 🔴 THE MOLECULE PARTITION, OR NO IMAGING. A writer handed no partition
+    // cannot wrap whole molecules and must not wrap per atom, so it writes raw
+    // coordinates rather than tearing every water in half at the boundary.
+    // Every caller in this repository supplies it; the option exists so a
+    // caller that genuinely wants unwrapped output can ask for it.
+    this.molecules = options.molecules ?? null;
+    this.imaged = this.molecules === null
+      ? null : new Float64Array(this.atomCount * 3);
     this.firstStep = options.firstStep ?? 0;
     this.title = options.title ?? "Created by RainMD";
     this.frameCount = 0;
@@ -96,13 +105,22 @@ export class DcdWriter {
         + "first coordinates as a unit cell",
       );
     }
+    // 🔴 WRAPPED INTO THE CELL BEFORE IT IS WRITTEN - see shared/traj/imaging.js.
+    // Without this the file carries the integrator's unwrapped coordinates, and
+    // since water diffuses freely the solvent appears to fly away from the
+    // solute as the run goes on. OpenMM's own DCDReporter wraps by default;
+    // matching it is what makes this file interchangeable with one the
+    // notebooks wrote.
+    const frameCoordinates = this.molecules === null || boxVectors === null
+      ? positions
+      : imageMolecules(positions, boxVectors, this.molecules, this.imaged);
     // 🔴 DCD IS STRUCT-OF-ARRAYS: all x, then all y, then all z, each in its
     // own Fortran record. Writing interleaved xyz produces a file every reader
     // accepts and whose every coordinate is wrong.
     for (let atom = 0; atom < this.atomCount; atom += 1) {
-      this.x[atom] = positions[atom * 3] * ANGSTROM_PER_NM;
-      this.y[atom] = positions[atom * 3 + 1] * ANGSTROM_PER_NM;
-      this.z[atom] = positions[atom * 3 + 2] * ANGSTROM_PER_NM;
+      this.x[atom] = frameCoordinates[atom * 3] * ANGSTROM_PER_NM;
+      this.y[atom] = frameCoordinates[atom * 3 + 1] * ANGSTROM_PER_NM;
+      this.z[atom] = frameCoordinates[atom * 3 + 2] * ANGSTROM_PER_NM;
     }
 
     const cellBytes = this.periodic ? 56 : 0;

@@ -13,6 +13,7 @@
  * assign elements when there is no element column, so getting it wrong turns
  * every alpha carbon into a metal ion.
  */
+import { imageMolecules } from "./imaging.js";
 
 function atomNameField(name, atomicNumber) {
   const trimmed = (name ?? "").trim().slice(0, 4);
@@ -35,15 +36,43 @@ const ELEMENT_SYMBOLS = {
  * @param {ArrayLike<number>} positions 3N, nm
  * @param {object} [options] indices to write, header remarks, box
  */
+/**
+ * A chain letter per molecule, which an AMBER topology does not provide.
+ *
+ * 🔴 EVERY ATOM USED TO BE CHAIN "A", AND A CARTOON RENDERER BELIEVES IT. A
+ * prmtop carries no chain IDs, so writing a constant was defensible while the
+ * only reader was this port's own viewer - which separates molecules by the
+ * bond graph. Hand the same file to 3Dmol and it joins the last residue of one
+ * peptide to the first of the next with a ribbon across the box, because a
+ * single chain ID is a promise that they are one chain. The TER records were
+ * already there and are not enough on their own.
+ *
+ * A..Z then a..z then 0..9, and everything past that shares "Z" rather than
+ * emitting a character the column cannot hold.
+ */
+const CHAIN_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+function chainLetter(molecule) {
+  return molecule < CHAIN_LETTERS.length ? CHAIN_LETTERS[molecule] : "Z";
+}
+
 export function writePdb(system, positions, options = {}) {
   const topology = system.topology;
+  // 🔴 IMAGED LIKE A TRAJECTORY FRAME, for the same reason - see
+  // shared/traj/imaging.js. A PDB of a solute that has drifted out of the cell
+  // opens in the wrong place relative to the box the CRYST1 record declares,
+  // and a PDB of "everything" showed the same scattered solvent the DCD did.
+  const box = options.box ?? null;
+  const imaged = box !== null && options.image !== false
+    && topology.moleculeOfAtom !== undefined
+    ? imageMolecules(positions, system.boxVectors ?? null,
+      { moleculeOfAtom: topology.moleculeOfAtom, count: topology.moleculeCount })
+    : positions;
   const indices = options.indices ?? null;
   const lines = [];
   for (const remark of options.remarks ?? []) {
     // REMARK text is free-form but must stay inside the 80-column record.
     lines.push(`REMARK ${String(remark).slice(0, 72)}`);
   }
-  const box = options.box ?? null;
   if (box !== null) {
     const [a, b, c] = box.lengths.map((value) => value * 10);
     const [alpha, beta, gamma] = box.angles;
@@ -81,10 +110,11 @@ export function writePdb(system, positions, options = {}) {
       + String(serial % 100000).padStart(5)
       + " " + atomNameField(topology.atomNames[atom], topology.atomicNumbers[atom])
       + " " + (topology.residueNames[residue] ?? "UNK").slice(0, 3).padEnd(3)
-      + " A" + String((residue + 1) % 10000).padStart(4) + "    "
-      + (positions[atom * 3] * 10).toFixed(3).padStart(8)
-      + (positions[atom * 3 + 1] * 10).toFixed(3).padStart(8)
-      + (positions[atom * 3 + 2] * 10).toFixed(3).padStart(8)
+      + " " + chainLetter(molecule)
+      + String((residue + 1) % 10000).padStart(4) + "    "
+      + (imaged[atom * 3] * 10).toFixed(3).padStart(8)
+      + (imaged[atom * 3 + 1] * 10).toFixed(3).padStart(8)
+      + (imaged[atom * 3 + 2] * 10).toFixed(3).padStart(8)
       + "  1.00  0.00          "
       + element.padStart(2),
     );
