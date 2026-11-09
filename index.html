@@ -183,8 +183,9 @@
             </select></div>
           <div class="field"><span class="field-label">While running</span>
             <select id="animate">
-              <option value="off" selected>draw at checkpoints</option>
-              <option value="on">animate every frame</option>
+              <option value="production" selected>animate production only</option>
+              <option value="all">animate every stage</option>
+              <option value="off">draw at checkpoints only</option>
             </select></div>
           <div class="field" id="binder-row" hidden><span class="field-label">Binder</span>
             <select id="binder" title="Which solute molecule is the binder. An AMBER topology carries no chain IDs, so this is the molecule list instead."></select></div>
@@ -254,8 +255,14 @@
     <p>Minimisation, dynamics, the constraint solver and the barostat all run on
     the device, and a block of steps is encoded into one command buffer so nothing
     in a step reads back to the browser. Measured on a 1190-atom test system:
-    <strong>0.8&nbsp;ms per step, about 215&nbsp;ns/day</strong> in NVT, with an
-    energy drift of 0.30&nbsp;kJ/mol per ns per atom over 20&nbsp;ps.</p>
+    <strong>1.30&nbsp;ms per step, about 133&nbsp;ns/day</strong> on the shipped
+    defaults — NPT at 2&nbsp;fs — with an energy drift of 0.30&nbsp;kJ/mol per ns
+    per atom over 20&nbsp;ps. <strong>Throughput falls with system size</strong>:
+    the same solute in a 12&nbsp;Å water box is 2854 atoms and 74&nbsp;ns/day, so
+    an alanine dipeptide built with the notebooks' padding is tens of ns/day
+    rather than hundreds. A 4&nbsp;fs timestep roughly doubles it;
+    <code>docs/STATUS.md</code> has the decomposition and says what each option
+    costs.</p>
     <p>The structure is drawn by <a href="https://molstar.org/">Mol*</a>, RCSB's
     own renderer, vendored under its MIT licence so the page needs no network and
     sends no request when you open it. It costs 1.47&nbsp;MB gzipped against

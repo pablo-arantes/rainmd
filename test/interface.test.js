@@ -17,6 +17,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync, existsSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { kabschTransform, applyTransform, centroid } from "../shared/analysis/kabsch.js";
 import {
   buildSelections, classifyResidue, VIEW_PRESETS, BODY_COLOURS, STRUCTURE_COLOURS,
@@ -261,6 +262,34 @@ test("secondaryOfAtoms spreads a residue's assignment to all its atoms", () => {
   assert.equal(result.breaks.length, 1, "two peptide chains, one break");
   assert.equal(result.counts.helix + result.counts.sheet + result.counts.coil,
     result.perResidue.length);
+});
+
+test("every tool and page module parses", () => {
+  // 🔴 A BACKTICK INSIDE A TEMPLATE LITERAL HAS BROKEN THE HARNESS FIVE TIMES.
+  // Everything the browser lane injects lives inside one, so a backtick
+  // anywhere in it - in a comment, in prose, around an identifier - ends the
+  // string and the file stops parsing at a word in a sentence, with an error
+  // that names an identifier from the middle of a comment.
+  //
+  // The first version of this test was a regex over the literals, which was
+  // both convoluted and redundant: the failure IS a syntax error, so the real
+  // check is that the file parses. `node --check` does that properly, in a
+  // separate process, for every file this repository ships or runs - which
+  // subsumes the backtick trap and every other syntax mistake with it.
+  const files = [
+    "tools/gpu-page.mjs", "tools/gpu-node.mjs", "tools/check-against-openmm.mjs",
+    "tools/check-force-gradients.mjs",
+    "web/app.js", "web/molstar-viewer.js", "web/plot.js", "web/viewer.js",
+    "shared/traj/logmd.js", "shared/traj/imaging.js", "webgpu/simulation.js",
+  ];
+  for (const file of files) {
+    const result = spawnSync(process.execPath, ["--check", file], {
+      cwd: new URL("..", import.meta.url).pathname,
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 0,
+      `${file} does not parse:\n${result.stderr?.slice(0, 400)}`);
+  }
 });
 
 // ------------------------------------------------------------------- LogMD ----

@@ -124,8 +124,45 @@ device; nothing in a step reads back to the host. A block of steps is encoded
 into one command buffer, so there is no per-step round trip.
 
 Measured on this Mac (Apple Metal, 1190 atoms, PME 24³, 2 fs, HBonds):
-**0.72–1.03 ms/step, or about 215 ns/day** — against 47–79 ms/step for the host
-reference, a factor of 50 to 100.
+**1.30 ms/step, or about 133 ns/day** on the shipped defaults — against 47–79
+ms/step for the host reference, a factor of 40 to 60.
+
+🔴 **THIS SAID 0.72–1.03 ms/step AND 215 ns/day, AND IT WAS STALE.** That was
+measured in NVT, with a 0.2 nm skin and a 10-step rebuild, before the
+displacement kernel, the restraint pass or the barostat existed — a
+configuration the page no longer offers. A reader comparing their own ns/day
+against it was comparing against something unreachable, and one did. Measured
+now with `npm run bench:throughput`, in Chrome, 1190 atoms:
+
+| configuration | ms/step | ns/day |
+|---|---|---|
+| **shipped default — NPT, derived skin, adaptive rebuild, 2 fs** | **1.299** | **133** |
+| without the barostat (NVT) | 1.119 | 154 |
+| NVT, skin 0.2, rebuild every 10 — the old documented setting | 1.018 | 170 |
+| NPT with the equilibration restraint on | 1.268 | 136 |
+| NVT, rebuild every 40 | 1.101 | 157 |
+| NVT at 4 fs | 1.340 | **258** |
+
+So the old number is not reachable even in its own configuration: the best this
+machine now does there is 170 ns/day, because the displacement kernel runs every
+step and the force path has grown. The barostat costs about 13%, which matches
+the 0.3 ms/step the barostat note records.
+
+**And throughput falls with system size**, which is what a reader comparing
+numbers actually needs:
+
+| system | atoms | ms/step | ns/day |
+|---|---|---|---|
+| alanine dipeptide, 8 Å padding (`ala-wat`) | 1190 | 1.299 | 133 |
+| two peptides in water (`two-body`) | 2547 | 1.683 | 103 |
+| alanine dipeptide, 12 Å padding (`ala-wat-big`) | 2854 | 2.346 | **74** |
+
+A reader on an M3 Pro measured **53 ns/day** for an alanine dipeptide, which is
+within 1.4x of the 2854-atom figure here — so it is the expected throughput for
+a realistically solvated box on that hardware, not a fault. The levers, largest
+first: a **4 fs timestep** (roughly doubles ns/day, and wants hydrogen mass
+repartitioning to be safe — this port does not do that yet), **a smaller water
+box**, and **NVT for production** if the density is already right.
 
 🔴 **THIS LIST HAS BEEN WRONG BEFORE, WHICH COSTS MORE THAN A MISSING ONE.** It
 named the barostat as "the only missing piece of physics" while the table above

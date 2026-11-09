@@ -312,7 +312,7 @@ try {
         // path updates the viewer's existing model instead of rebuilding it, so
         // it is the one that can disagree with the simulation about how many
         // atoms there are - the failure 3Dmol does not raise on its own.
-        document.getElementById("animate").value = "on";
+        document.getElementById("animate").value = "all";
 
         document.getElementById("minimise").click();
         for (let i = 0; i < 120; i += 1) {
@@ -580,7 +580,7 @@ try {
     if (payload.shareEnabled !== true) process.exitCode = 1;
     console.log(`live animation:              mode "${payload.animateMode}", `
       + `${payload.animatedAtoms} atoms in the viewer after the run`);
-    if (payload.animateMode === "on" && payload.animatedAtoms === 0) process.exitCode = 1;
+    if (payload.animateMode !== "off" && payload.animatedAtoms === 0) process.exitCode = 1;
     console.log(`stage gating:                equilibrate locked before `
       + `minimise: ${payload.equilibrateWasLockedBeforeMinimise}`);
     if (payload.equilibrateWasLockedBeforeMinimise !== false) {
@@ -945,6 +945,79 @@ try {
     else console.log("  every stage started from the one before it");
   }
 
+  /**
+   * 🔴 THE STRIDE LOOP LOST TWO THIRDS OF A RUN AND NOTHING SAID SO. Each stage
+   * built its own writer and finished it into one variable, so a three-stride
+   * production left only stride three and production erased equilibration
+   * before that - and the download still produced a valid DCD, just a third of
+   * the trajectory. Found by a reader asking where the strides were recorded.
+   * The only way to see it is to run more than one stride and count the files.
+   */
+  if (process.argv.includes("--strides")) {
+    const expression = `(async () => {
+        const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+        const idle = async (id, tries) => {
+          for (let i = 0; i < tries; i += 1) {
+            await wait(250);
+            if (!document.getElementById(id).disabled) return true;
+          }
+          return false;
+        };
+        const [top, crd] = await Promise.all([
+          fetch("test/fixtures/ala-wat.prmtop").then((r) => r.text()),
+          fetch("test/fixtures/ala-wat.inpcrd").then((r) => r.text()),
+        ]);
+        const files = new DataTransfer();
+        files.items.add(new File([top], "ala-wat.prmtop"));
+        files.items.add(new File([crd], "ala-wat.inpcrd"));
+        const input = document.getElementById("file-input");
+        input.files = files.files;
+        input.dispatchEvent(new Event("change"));
+        await wait(1500);
+        document.getElementById("engine").value = "gpu";
+        document.getElementById("pressure").value = "1";
+        document.getElementById("min-steps").value = "1000";
+        document.getElementById("eq-time").value = "0.004";
+        document.getElementById("eq-write").value = "1";
+        document.getElementById("prod-time").value = "0.004";
+        document.getElementById("prod-strides").value = "3";
+        document.getElementById("prod-write").value = "1";
+        document.getElementById("animate").value = "production";
+
+        document.getElementById("minimise").click();
+        await idle("minimise", 240);
+        document.getElementById("equilibrate").click();
+        await idle("equilibrate", 480);
+        const afterEquil = window.rainmd.trajectoryFiles.slice();
+        document.getElementById("produce").click();
+        await idle("produce", 960);
+        return JSON.stringify({
+          afterEquil,
+          afterProduction: window.rainmd.trajectoryFiles,
+          bytes: window.rainmd.trajectoryBytes,
+        });
+      })()`;
+    const evaluation = await cdp(socketUrl, "Runtime.evaluate", {
+      expression, awaitPromise: true, returnByValue: true,
+    });
+    const payload = JSON.parse(cdpValue(evaluation, "--strides"));
+    console.log("\ntrajectory files held, as label:frames");
+    console.log(`  after equilibration: ${payload.afterEquil.join(", ") || "(none)"}`);
+    console.log(`  after production:    ${payload.afterProduction.join(", ") || "(none)"}`);
+    console.log(`  total bytes held:    ${payload.bytes}`);
+    // One file for equilibration plus one per stride, and equilibration's must
+    // still be there afterwards.
+    const labels = payload.afterProduction.map((entry) => entry.split(":")[0]);
+    const wanted = ["equil", "prod_1", "prod_2", "prod_3"];
+    const ok = wanted.every((label) => labels.includes(label));
+    if (!ok) {
+      console.log(`  FAILED: expected ${wanted.join(", ")} and got ${labels.join(", ")}`);
+      process.exitCode = 1;
+    } else {
+      console.log("  every stage and every stride kept its own file");
+    }
+  }
+
   const moduleArg = process.argv.find((argument) => argument.startsWith("--module="));
   if (moduleArg !== undefined) {
     // 🔴 THE SAME CHECK MODULE AS THE NODE LANE, IMPORTED BY THE PAGE. Its
@@ -955,16 +1028,28 @@ try {
     const path = moduleArg.slice("--module=".length);
     const evaluation = await cdp(socketUrl, "Runtime.evaluate", {
       expression: `(async () => {
+        const MODULE_ARGS = ARGS_JSON;
         try {
           const { requestMdDevice } = await import("/webgpu/runtime/device.js");
           const { device } = await requestMdDevice(navigator.gpu);
           const module = await import("/${path}");
-          const result = await module.main(device);
+          // 🔴 THE MODULE'S ARGUMENTS HAVE TO REACH IT. This called
+          // main(device) with nothing else, so every --fixture= and every
+          // other flag was silently ignored and the module ran its default -
+          // three different fixtures in a row produced three identical
+          // numbers, which reads as a measurement that does not depend on its
+          // input. The Dawn lane forwarded them all along, so the two lanes
+          // disagreed about what they were measuring.
+          // (No backticks in here: it is inside a template literal.)
+          const result = await module.main(device, MODULE_ARGS);
           return JSON.stringify(result);
         } catch (error) {
           return JSON.stringify({ error: String(error && error.stack || error) });
         }
-      })()`,
+      })()`.replace("ARGS_JSON", JSON.stringify(
+        // Everything after the module path, the way the Dawn lane forwards it.
+        process.argv.slice(2).filter((a) => !a.startsWith("--module=")
+          && !a.startsWith("--url=") && a !== "--check"))),
       awaitPromise: true, returnByValue: true,
     });
     const payload = JSON.parse(cdpValue(evaluation, `--module=${path}`));

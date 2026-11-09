@@ -33,7 +33,9 @@
     "test:gpu:restraints": "node tools/gpu-node.mjs tools/gpu/check-restraints.mjs",
     "test:page:handoff": "node tools/gpu-page.mjs --handoff",
     "test:page:layout": "node tools/gpu-page.mjs --layout --width=1440 --shot-of=\"body\" --screenshot=/tmp/rainmd-layout-wide.png && node tools/gpu-page.mjs --layout --width=430 --shot-of=\"body\" --screenshot=/tmp/rainmd-layout-narrow.png",
-    "test:page:examples": "node tools/gpu-page.mjs --examples"
+    "test:page:examples": "node tools/gpu-page.mjs --examples",
+    "bench:throughput": "node tools/gpu-page.mjs --module=tools/gpu/bench-throughput.mjs",
+    "test:page:strides": "node tools/gpu-page.mjs --strides"
   },
   "optionalDependencies": {
     "webgpu": "0.3.0"

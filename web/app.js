@@ -35,7 +35,22 @@ let gpu = null;
 let loaded = null;
 let hostState = null;
 let stopSignal = null;
-let trajectory = null;
+/**
+ * One trajectory per stage and per stride, as the notebooks write them.
+ *
+ * 🔴 THIS WAS A SINGLE VARIABLE AND STRIDES SILENTLY OVERWROTE IT. Each call to
+ * `runOnDevice` built its own `DcdWriter` and finished it into one `trajectory`,
+ * so a three-stride production left only stride three, and production erased
+ * equilibration before that. The `appendTrajectory` flag the stride loop passed
+ * was never read by anything. Nothing reported the loss: the download worked,
+ * the file was valid, and it held a third of the run.
+ *
+ * The notebooks write `jobname_1.dcd`, `jobname_2.dcd`, … one per stride, and
+ * the stride loop exists so a session that dies can resume from the last
+ * restart. Keeping them separate and numbered is both faithful and the thing
+ * that cannot lose a frame.
+ */
+let trajectories = [];
 let finalState = null;
 let plot = null;
 let viewer = null;
@@ -228,7 +243,7 @@ async function loadFiles(files) {
     selections = buildSelections(selectionSystem);
     analysis = null;
     hostState = null;
-    trajectory = null;
+    trajectories = [];
     finalState = null;
     element("download-dcd").disabled = true;
     element("download-state").disabled = true;
@@ -1031,6 +1046,7 @@ element("equilibrate").addEventListener("click", () => runStage("equilibration",
     restraintForce: force,
     restraintAtoms,
     stage: "equilibration",
+    trajectoryLabel: "equil",
   });
   stagesDone.equilibrate = true;
 }));
@@ -1051,7 +1067,8 @@ element("produce").addEventListener("click", () => runStage("production", async 
       restraintForce: 0,
       restraintAtoms: [],
       stage: strides > 1 ? `production ${stride + 1}/${strides}` : "production",
-      appendTrajectory: stride > 0,
+      // The notebooks number a stride's files; so does this.
+      trajectoryLabel: strides > 1 ? `prod_${stride + 1}` : "prod",
     });
   }
 }));
@@ -1174,7 +1191,18 @@ async function runOnDevice(stageConfig = {}) {
       // multi-hour production stage is an hour nobody is watching. It is worth
       // having for a short equilibration, where seeing the water settle is the
       // point - so it is a choice rather than a default.
-      if (element("animate").value === "on") animateFrame();
+      // 🔴 PRODUCTION ONLY BY DEFAULT, WHICH IS WHAT A READER ASKED FOR AND IS
+      // ALSO THE CHEAP CHOICE. Equilibration is short and restrained - there is
+      // little to see - while production is the run anyone wants to watch. The
+      // cost is per REPORT, not per step, so at the default 10 ps interval it
+      // is one Mol* reload every 5000 steps and does not move ms/step at all;
+      // the 17% figure recorded earlier was measured at a 1 ps interval, which
+      // is 500 steps and ten times as many reloads.
+      const animate = element("animate").value;
+      const isProduction = (stageConfig.stage ?? "").startsWith("production");
+      if (animate === "all" || (animate === "production" && isProduction)) {
+        animateFrame();
+      }
       if (writer !== null) writer.appendFrame(lastPositions, system.boxVectors);
       element("download-pdb").disabled = false;
       element("download-metrics").disabled = false;
@@ -1244,10 +1272,17 @@ async function runOnDevice(stageConfig = {}) {
     log(`  carried forward: ${state.volume.toFixed(3)} nm³ box, `
       + `${hostState.positions.length / 3} positions and their velocities`);
     if (writer !== null && writer.frameCount > 0) {
-      trajectory = writer.finish();
+      const bytes = writer.finish();
+      trajectories.push({
+        label: stageConfig.trajectoryLabel ?? "run",
+        bytes,
+        frames: writer.frameCount,
+      });
       element("download-dcd").disabled = false;
+      const total = trajectories.reduce((sum, t) => sum + t.frames, 0);
       log(`  trajectory: ${writer.frameCount} frames, `
-        + `${(trajectory.length / 2 ** 20).toFixed(2)} MiB — ready to download`);
+        + `${(bytes.length / 2 ** 20).toFixed(2)} MiB — `
+        + `${trajectories.length} file(s) held, ${total} frames in total`);
     }
   } finally {
     simulation.release();
@@ -1296,8 +1331,22 @@ async function runOnHost(stageConfig = {}) {
 
 // --------------------------------------------------------------- downloads ----
 element("download-dcd").addEventListener("click", () => {
-  if (trajectory === null) return;
-  download(`${loaded.name}.dcd`, trajectory, "application/octet-stream");
+  if (trajectories.length === 0) return;
+  // 🔴 EVERY FILE, NOT THE LAST ONE. One download per stage and per stride, the
+  // way the notebooks name them - `_equil`, `_prod_1`, `_prod_2` - so a
+  // multi-stride production comes down whole. cpptraj and MDAnalysis both take
+  // a list of trajectories against one topology, so they reassemble in order.
+  for (const entry of trajectories) {
+    download(`${loaded.name}_${entry.label}.dcd`, entry.bytes,
+      "application/octet-stream");
+  }
+  const total = trajectories.reduce((sum, t) => sum + t.frames, 0);
+  log(`  wrote ${trajectories.length} file(s), ${total} frames in total:`);
+  for (const entry of trajectories) {
+    log(`    ${loaded.name}_${entry.label}.dcd — ${entry.frames} frames`);
+  }
+  log("  load them in order against the .prmtop; cpptraj and MDAnalysis both "
+    + "take a list of trajectories for one topology");
   log(`  wrote ${loaded.name}.dcd — open it with the .prmtop you loaded, in `
     + `cpptraj, MDAnalysis, VMD or PyMOL`);
 });
@@ -1478,7 +1527,10 @@ window.rainmd = {
   get device() { return gpu?.device ?? null; },
   get viewer() { return viewer; },
   get loaded() { return loaded; },
-  get trajectoryBytes() { return trajectory === null ? 0 : trajectory.length; },
+  get trajectoryBytes() {
+    return trajectories.reduce((total, entry) => total + entry.bytes.length, 0);
+  },
+  get trajectoryFiles() { return trajectories.map((e) => `${e.label}:${e.frames}`); },
   get selections() { return selections; },
   // The stage handoff is only checkable from outside if the state is reachable.
   get hostState() { return hostState; },

@@ -17,8 +17,12 @@ Chrome may still need `--enable-unsafe-webgpu`.
 The simulation is GPU-resident: forces *and* integration run on the device, and
 nothing in a step reads back to the host. It reproduces OpenMM's energies to
 1.5e-6 and its per-atom forces to 8.8e-5 on the notebooks' own configuration,
-and runs this 1190-atom test system at **about 215 ns/day** on an Apple laptop
-GPU — roughly 60x the host reference it is checked against.
+and runs the 1190-atom test system at **about 133 ns/day** on an Apple laptop
+GPU — roughly 60x the host reference it is checked against. Throughput falls
+with system size: the same solute in a 12 Å water box is 2854 atoms and
+74 ns/day. A literature-length production is not reachable here for a solvated
+protein, and the page tells you what your own system will cost before you
+start.
 
 A run on the page writes a **DCD trajectory and an AMBER restart**, so the
 output goes straight into cpptraj, MDAnalysis, VMD or PyMOL alongside the
