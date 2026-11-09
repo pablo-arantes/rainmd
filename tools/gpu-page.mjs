@@ -1018,6 +1018,120 @@ try {
     }
   }
 
+  // Watch the viewer DURING production, which is the only way to see whether a
+  // live animation is animating or thrashing.
+  if (process.argv.includes("--animate-probe")) {
+    const expression = `(async () => {
+        const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+        const idle = async (id, tries) => {
+          for (let i = 0; i < tries; i += 1) {
+            await wait(250);
+            if (!document.getElementById(id).disabled) return true;
+          }
+          return false;
+        };
+        const [top, crd] = await Promise.all([
+          fetch("test/fixtures/ala-wat.prmtop").then((r) => r.text()),
+          fetch("test/fixtures/ala-wat.inpcrd").then((r) => r.text()),
+        ]);
+        const files = new DataTransfer();
+        files.items.add(new File([top], "ala-wat.prmtop"));
+        files.items.add(new File([crd], "ala-wat.inpcrd"));
+        const input = document.getElementById("file-input");
+        input.files = files.files;
+        input.dispatchEvent(new Event("change"));
+        await wait(1500);
+        document.getElementById("engine").value = "gpu";
+        document.getElementById("pressure").value = "1";
+        document.getElementById("min-steps").value = "500";
+        document.getElementById("eq-time").value = "0.004";
+        document.getElementById("eq-write").value = "1";
+        document.getElementById("prod-time").value = "0.05";
+        document.getElementById("prod-strides").value = "1";
+        document.getElementById("prod-write").value = "1";
+        document.getElementById("animate").value = "production";
+        document.getElementById("minimise").click();
+        await idle("minimise", 240);
+        document.getElementById("equilibrate").click();
+        await idle("equilibrate", 480);
+
+        // 🔴 HOW MANY ROWS EACH PANEL HOLDS, AND WHETHER TIME GOES BACKWARDS.
+        // A panel that still holds the previous stage's rows draws one polyline
+        // across the axis and back, which looks like two traces. The test is
+        // mechanical: within one panel the time column must be monotonic.
+        const panelState = () => {
+          const stack = window.rainmd.plotRows?.() ?? null;
+          if (stack === null) return null;
+          let backwards = 0;
+          for (let i = 1; i < stack.length; i += 1) {
+            if (stack[i] < stack[i - 1]) backwards += 1;
+          }
+          return { rows: stack.length, backwards };
+        };
+        const afterEquilPanels = panelState();
+
+        // Sample the viewer repeatedly while production runs.
+        document.getElementById("produce").click();
+        const samples = [];
+        for (let i = 0; i < 14; i += 1) {
+          await wait(1200);
+          const v = window.rainmd.viewer;
+          // 🔴 THE DRAWN COORDINATE, NOT THE ATOM COUNT. A viewer that is not
+          // updating still holds the right number of atoms; the only thing that
+          // says whether an animation animates is whether the numbers move.
+          let x = null;
+          try {
+            const entry = v.viewer.plugin.managers.structure.hierarchy
+              .current.structures[0];
+            const model = entry.cell.obj.data.model
+              ?? entry.cell.obj.data.units[0].model;
+            x = Number(model.atomicConformation.x[0].toFixed(4));
+          } catch (error) { x = String(error.message).slice(0, 60); }
+          samples.push({
+            atoms: v?.atomCount ?? -1,
+            firstAtomX: x,
+            canvases: document.querySelectorAll("#viewer canvas").length,
+            running: !document.getElementById("stop").disabled,
+          });
+          if (document.getElementById("produce").disabled === false) break;
+        }
+        return JSON.stringify({ samples,
+          afterEquilPanels,
+          duringProductionPanels: panelState(),
+          droppedFrames: window.rainmd.viewer?.dropped ?? null,
+          log: document.getElementById("log").textContent.slice(-900) });
+      })()`;
+    const evaluation = await cdp(socketUrl, "Runtime.evaluate", {
+      expression, awaitPromise: true, returnByValue: true,
+    });
+    const payload = JSON.parse(cdpValue(evaluation, "--animate-probe"));
+    console.log("\nviewer sampled during production:");
+    for (const [index, sample] of payload.samples.entries()) {
+      console.log(`  ${String(index).padStart(2)}  atoms ${String(sample.atoms).padStart(5)}`
+        + `  first atom x ${String(sample.firstAtomX).padStart(10)}`
+        + `  running ${sample.running}`);
+    }
+    const eq = payload.afterEquilPanels;
+    const prod = payload.duringProductionPanels;
+    console.log(`\npanel rows after equilibration: ${eq?.rows}, `
+      + `time going backwards ${eq?.backwards} time(s)`);
+    console.log(`panel rows during production:   ${prod?.rows}, `
+      + `time going backwards ${prod?.backwards} time(s)`);
+    console.log(`viewer frames dropped while busy: ${payload.droppedFrames}`);
+    // 🔴 A PANEL'S TIME COLUMN MUST BE MONOTONIC. One step backwards means two
+    // stages are superimposed, which is what a reader saw as two traces.
+    if ((prod?.backwards ?? 1) !== 0) {
+      console.log("  FAILED: a panel holds rows from more than one stage");
+      process.exitCode = 1;
+    }
+    if ((prod?.rows ?? 0) === 0) {
+      console.log("  FAILED: production reported no rows");
+      process.exitCode = 1;
+    }
+    console.log("\n--- tail of the log ---");
+    console.log(payload.log.trim());
+  }
+
   const moduleArg = process.argv.find((argument) => argument.startsWith("--module="));
   if (moduleArg !== undefined) {
     // 🔴 THE SAME CHECK MODULE AS THE NODE LANE, IMPORTED BY THE PAGE. Its

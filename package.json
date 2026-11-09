@@ -35,7 +35,8 @@
     "test:page:layout": "node tools/gpu-page.mjs --layout --width=1440 --shot-of=\"body\" --screenshot=/tmp/rainmd-layout-wide.png && node tools/gpu-page.mjs --layout --width=430 --shot-of=\"body\" --screenshot=/tmp/rainmd-layout-narrow.png",
     "test:page:examples": "node tools/gpu-page.mjs --examples",
     "bench:throughput": "node tools/gpu-page.mjs --module=tools/gpu/bench-throughput.mjs",
-    "test:page:strides": "node tools/gpu-page.mjs --strides"
+    "test:page:strides": "node tools/gpu-page.mjs --strides",
+    "test:page:animate": "node tools/gpu-page.mjs --animate-probe"
   },
   "optionalDependencies": {
     "webgpu": "0.3.0"

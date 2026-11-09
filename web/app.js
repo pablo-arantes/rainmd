@@ -983,6 +983,19 @@ for (const control of ["timestep", "eq-time", "prod-time", "prod-strides"]) {
  */
 async function runStage(label, body) {
   if (loaded === null) return;
+  // 🔴 THE PANELS ARE CLEARED PER STAGE, AND NOT DOING SO DREW TWO RUNS AS ONE.
+  // Every stage builds a fresh simulation whose step counter starts at zero, so
+  // its rows carry times 0..T again - and a panel that still held the previous
+  // stage's rows drew one polyline right across the axis, back to the left, and
+  // right again. That renders as TWO traces per panel: the equilibration
+  // transient and the production run superimposed, with the potential energy
+  // showing a steep descent that had already finished. Reported by a reader
+  // from a screenshot; no gate was watching for it.
+  //
+  // Cleared here rather than in the run loop so a stage that fails before its
+  // first report still leaves the panels empty rather than stale.
+  ensurePlot().clear();
+  element("panels").hidden = true;
   const buttons = ["minimise", "equilibrate", "produce", "calibrate"];
   const stopButton = element("stop");
   for (const id of buttons) element(id).disabled = true;
@@ -1534,5 +1547,8 @@ window.rainmd = {
   get selections() { return selections; },
   // The stage handoff is only checkable from outside if the state is reachable.
   get hostState() { return hostState; },
+  // The first panel's time column, so a gate can check it is monotonic - two
+  // stages superimposed is only visible as time going backwards.
+  plotRows() { return plot === null ? null : plot.panels[0].rows.map((r) => r.time); },
   get analysis() { return analysis; },
 };

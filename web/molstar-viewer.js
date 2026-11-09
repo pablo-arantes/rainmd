@@ -51,6 +51,17 @@ export class MolstarViewer {
     this.visibleCount = 0;
     this.chains = [];
     this.lastOptions = {};
+    /**
+     * 🔴 ONE RELOAD AT A TIME, AND A FRAME ARRIVING DURING ONE IS DROPPED.
+     * A frame update is a clear-and-load, so two overlapping ones have a
+     * `plugin.clear()` racing a load - the viewer goes blank, or ends up with
+     * the state tree half built. Reports can arrive faster than Mol* rebuilds,
+     * so the choice is drop or queue, and dropping is right: a queue would
+     * render frames the simulation has already left behind and fall further
+     * behind the longer the run went.
+     */
+    this.busy = false;
+    this.dropped = 0;
   }
 
   /**
@@ -103,6 +114,13 @@ export class MolstarViewer {
   async setStructure(pdb, options = {}) {
     const viewer = await this.init();
     this.lastOptions = options;
+    // 🔴 THE CAMERA SURVIVES A REBUILD. Without this every frame of an
+    // animation re-ran `zoomTo`, so a reader who had rotated or zoomed was
+    // snapped back to a default view several times a second - which looks
+    // exactly like a viewer that is broken rather than one that is updating.
+    // The snapshot is taken before the clear and put back after the load.
+    const camera = options.keepCamera === true
+      ? viewer.plugin.canvas3d?.camera?.getSnapshot() : null;
     const declared = (pdb.match(/^(ATOM {2}|HETATM)/gm) ?? []).length;
     // 🔴 CLEARED FIRST, OR EVERY LOAD ADDS ANOTHER STRUCTURE. Mol*'s
     // `loadStructureFromData` appends to the state tree; without this the
@@ -124,6 +142,9 @@ export class MolstarViewer {
       this.parseWarning = null;
     }
     await this.#paint(options);
+    if (camera !== null && camera !== undefined) {
+      try { viewer.plugin.canvas3d?.camera?.setState(camera, 0); } catch { /* ignore */ }
+    }
     this.visibleCount = this.atomCount;
     return this.atomCount;
   }
@@ -170,7 +191,7 @@ export class MolstarViewer {
       await plugin.managers.structure.component.addRepresentation(
         components, "ball-and-stick");
     }
-    this.#frameCamera();
+    if (options.keepCamera !== true) this.#frameCamera();
   }
 
   /**
@@ -196,7 +217,13 @@ export class MolstarViewer {
    */
   async setFrame(pdb) {
     if (this.ready === null) return;
-    await this.setStructure(pdb, this.lastOptions);
+    if (this.busy) { this.dropped += 1; return; }
+    this.busy = true;
+    try {
+      await this.setStructure(pdb, { ...this.lastOptions, keepCamera: true });
+    } finally {
+      this.busy = false;
+    }
   }
 
   /** Re-colour without rebuilding. */

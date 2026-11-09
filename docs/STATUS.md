@@ -75,6 +75,10 @@ Re-run them with `npm run check:openmm`, `npm run check:gradients`,
 | **every representation and colour mode still works after a run** | headless Chrome, after 4000 NPT steps | cartoon / cartoon+sticks / atoms and structure / chain / element all build, with the atom count checked each time |
 | **the LogMD payload matches their client's** | `logmd/logmd.py`'s `upload_worker_process`, read as source | the same seven keys, `frame_num` as a string, `user_id` pinned to `"public"` and `token` to `null` — a page must never send an account |
 | **a failed share says which frame and why** | an injected `fetch`, so no test touches the network | 404 and a thrown `fetch` both reported with the frame index; the opaque-failure message names CORS *and* a dead endpoint, because a browser cannot tell them apart |
+| **each stage's panels are its own** | three stages run through the page, reading the first panel's time column | strictly monotonic — a single step backwards means two stages superimposed, which is how it looked when it was broken: 21 rows with one reversal against production's own 16 |
+| **the live animation actually moves** | the drawn coordinate read out of Mol*'s model during production | first atom x walks 10.77 → 9.86 → 8.74 → … over a 25,000-step run; the atom count alone cannot see this, and a stable count was what made it look fine |
+| **the camera survives a frame update** | `keepCamera` on a frame reload | the snapshot is restored after the rebuild, so a reader's own rotation and zoom are not reset several times a second |
+| **the viewer keeps up** | frames dropped while a reload is in flight, 1 ps reporting interval | **0 dropped** on the solvated fixture — a frame arriving mid-rebuild is dropped rather than queued, because a queue renders frames the simulation has already left behind |
 | **the interface follows LocalFold's** | screenshots at 1440 px and 500 px, through the page's own controls | two columns with a tabbed result pane, white cards, capitalised field labels in bordered groups, one filled primary action; single column below 64rem with the structure first; no horizontal scroll at either width |
 | **the ribbon's frame is a valid frame** | the three structure fixtures, guide by guide | side vectors unit length to 1e-5 and perpendicular to the backbone to **1e-5**; consecutive frames never oppose (min dot +0.62 helix, +0.83 strand) |
 | **the flip correction is what stops a strand twisting** | deleting it | the minimum consecutive dot goes from +0.62 to **−0.75**, i.e. the frame reverses — the one ribbon property a still image of a helix cannot show |
@@ -280,6 +284,28 @@ for the 2547-atom two-body fixture, 2 fs steps give about **77 ns/day**, so a
 500 ns production is **roughly 6.5 days of a tab staying open**. A literature
 protocol is not reachable here for a solvated protein, and a reader who types
 500 should see that before pressing the button rather than after.
+
+## Two defects a screenshot found
+
+**The panels were drawing two runs as one.** Every stage builds a fresh
+simulation whose step counter starts at zero, so its rows carry times 0..T
+again — and `ensurePlot().clear()` had been dropped when the single Run button
+became three stages. A panel still holding the previous stage's rows drew one
+polyline right across the axis, back to the left, and right again, which renders
+as **two traces per panel**: the equilibration transient and the production run
+superimposed. The potential-energy panel showed a steep descent that had already
+finished. Reported by a reader from a screenshot; nothing was watching for it.
+The gate is mechanical — within one panel the time column must be monotonic —
+and reproduces the symptom when the clear is removed.
+
+**And the live animation was updating while looking broken.** The coordinates
+were moving the whole time; what was wrong is that a frame update is a
+clear-and-reload in Mol*, and it re-ran `zoomTo` every frame. So a reader who
+had rotated or zoomed was snapped back to a default view several times a second,
+with a blank between the clear and the load. "Not working" was the right
+description of the experience and the wrong description of the cause — which is
+why the gate reads the drawn coordinate out of Mol*'s own model rather than
+trusting the atom count, which was stable and correct throughout.
 
 ## What the viewer costs now
 
