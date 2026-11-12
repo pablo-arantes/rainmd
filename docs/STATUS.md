@@ -428,8 +428,38 @@ Gated by `npm run check:triclinic`, which is how the octahedral case is held at
 all: `check-against-openmm.mjs` cannot hold it, because on this box OpenMM is
 the one that differs.
 
-**And the cooling at large timestep is a reported-temperature question, not an
-ensemble one — probably.** Two hypotheses tested this pass, both refuted:
+**And the cooling at large timestep is a reported-temperature question, now
+proven rather than suspected.** This port runs `B A O A B` and reports the
+kinetic temperature after the **closing** half kick; OpenMM's
+`LangevinMiddleIntegrator` ends its step at the position update and reports
+**one half kick earlier**. Same splitting, same trajectory; the estimator is
+taken at different points, and a half kick is an O(dt) change in `v` and O(dt²)
+in energy with the sign set by which side of it you stand on. Moving only the
+sampling point, in f64, on the identical trajectory:
+
+| | 1 fs | 2 fs | 4 fs | dependence |
+|---|---|---|---|---|
+| after the closing half kick (shipped) | 309.87 | 303.13 | 271.98 | **−37.89 K** |
+| one half kick earlier (OpenMM's point) | 312.40 | 314.80 | 316.08 | **+3.68 K** |
+| OpenMM itself, solvated | 299.37 | 299.31 | 302.38 | **+3.01 K** |
+
+The dependence collapses tenfold and the sign flips to OpenMM's, matching it
+within error — which accounts for the opposite signs, for both engines
+converging as dt → 0, and for the effect surviving in f64. **The dynamics is not
+at fault and the sampled ensemble was never in question.** Three hypotheses were
+refuted on the way and are recorded in `docs/REVIEW.md` so they are not retried:
+the constraint schedule, the RATTLE count, and an attempt to settle it from ⟨U⟩,
+which at 60 ps per arm is too noisy by about 16×.
+
+🔴 **THE FIX IS SPECIFIED AND MEASURED BUT NOT APPLIED, BECAUSE IT IS A CHOICE.**
+The two velocities differ by exactly `(halfStep/m)·F`, and reconstructing the
+earlier estimator from quantities already read back reproduces it to 0.2–0.8 K.
+On the host that is a few lines; on the device the kinetic reduction is handed
+velocities only, so the shader would need the forces and the half step. Whether
+to match OpenMM's point (making this port's bias +3 K at 4 fs instead of −6 K)
+or to report both is the owner's call.
+
+**Superseded:** Two hypotheses tested this pass, both refuted:
 
 - *The constraint schedule.* A patched host copy accumulating both half drifts
   and constraining the whole step **once**, OpenMM's shape, against the shipped

@@ -560,7 +560,7 @@ fetched at `web/app.js:197`). `ala-wat-big` is read by no code — but
 deleting it would make a published claim unreproducible. **Both need a tleap
 stanza, not a delete.**
 
-## 14. A *smaller* timestep makes the engine heat uncontrollably, and the temperature error is non-monotonic in dt — ✅ 14a FIXED, 14b STILL OPEN
+## 14. A *smaller* timestep makes the engine heat uncontrollably, and the temperature error is non-monotonic in dt — ✅ 14a FIXED; 14b DIAGNOSED, not yet fixed
 
 > **14b INVESTIGATED 2026-11-12 and CONFIRMED SEPARATE.** Re-measured on the
 > device after the 14a fix — NVT, friction 10/ps, 60 ps at each step from one
@@ -609,192 +609,70 @@ stanza, not a delete.**
 > term — which is a much narrower statement than "this port samples the wrong
 > ensemble".
 >
-> **The sharpened hypothesis: it is where in the BAOAB cycle velocities are read,
-> not what the dynamics does.** A kinetic estimator taken at a different point in
-> `B A O A B` has a different O(dt²) error, and a sign flip is exactly what
-> moving the sampling point does. That also fits the review's own Lyapunov
-> result: BAOAB's *configurational* temperature is exactly 298 K at every dt
-> while its on-step *kinetic* temperature is biased.
+> 🔴 **CAUSE FOUND AND PROVEN: IT IS WHERE IN THE CYCLE THE ESTIMATOR IS TAKEN,
+> AND THE DYNAMICS IS NOT AT FAULT.** This port runs `B A O A B` and reports the
+> kinetic temperature after the **closing** half kick. OpenMM's
+> `LangevinMiddleIntegrator` ends its step at the position update and velocity
+> correction, so it reports **one half kick earlier**. Both are the same
+> splitting over a full step and generate the same trajectory; only the kinetic
+> estimator's sampling point differs, and a half kick is an O(dt) change in `v`,
+> O(dt²) in energy, with the sign set by which side of the kick you stand on.
 >
-> **Next measurement, not attempted here:** a configurational temperature
-> (`Σ|F|² / k_B Σ∇·F`) for both engines at 1 / 2 / 4 fs. If the two agree there
-> while their kinetic estimators diverge, this is a reporting defect and the
-> sampled ensemble is sound — which is the question a user actually cares about.
+> Measured by moving only the sampling point in a patched host copy — same
+> system, seed, thermostat and trajectory, f64 so precision cannot confound it,
+> 120 ps per arm:
 >
-> 🔴 **AND ONE PLAUSIBLE TEST IS CONFOUNDED, WHICH IS WORTH RECORDING.** Running
-> unconstrained to see whether the bias vanishes does **not** discriminate: with
-> no constraints the water O–H stretch has a ~9 fs period, so ω·dt is order 1 at
-> 2 fs and BAOAB's intrinsic on-step kinetic bias is large there for reasons that
-> have nothing to do with SHAKE.
+> | | 1 fs | 2 fs | 4 fs | dependence (4 − 1) |
+> |---|---|---|---|---|
+> | after the closing half kick (shipped) | 309.87 | 303.13 | 271.98 | **−37.89 K** |
+> | one half kick earlier (OpenMM's point) | 312.40 | 314.80 | 316.08 | **+3.68 K** |
+> | OpenMM itself, solvated | 299.37 | 299.31 | 302.38 | **+3.01 K** |
 >
-> **Practical consequence meanwhile:** at the shipped 2 fs default the reported
-> temperature reads about 2 K below the setpoint, and at 4 fs about 6 K below.
-> That is a reporting-and-sampling bias of under 1% and 2.5% respectively, not a
-> blow-up — but a user comparing against a notebook run will see it.
-
-> **14a FIXED 2026-11-12.** SHAKE accumulates the correction it applies and the
-> velocity update is `v += correction/halfStep` — algebraically identical, far
-> better conditioned. Drift ratio over a fourfold smaller step: **2.03**, was
-> **824**; end temperature 299.5/297.4/299.1 K, where 0.25 fs reached 398 K; one
-> device step against the f64 host 20× closer. Gated by `npm run check:timestep`
-> (its own script — it is a multi-minute run). The f64 cross-check caught a
-> doubled correction before it reached the kernel: iterating constraints touches
-> a water oxygen twice, harmless under an overwrite and a factor of two under an
-> addition. **14b remains open and is not this line.**
+> The dependence collapses by a factor of ten **and the sign flips to OpenMM's**,
+> matching its +3.01 K within error. That accounts for every observation: the
+> opposite signs, both engines converging as dt → 0, immunity to the SHAKE
+> schedule and to the RATTLE count, and the effect surviving in f64.
 >
-> **The original investigation follows.**
-> This finding splits into two defects of opposite sign, and only one of them is
-> the line everybody suspected.
+> **Two hypotheses refuted along the way**, both recorded so they are not
+> retried. *The constraint schedule*: a patched copy constraining the whole
+> step's displacement once, OpenMM's shape, gives −40.18 K against the shipped
+> −37.89. *The RATTLE count*: one velocity projection per step instead of three
+> gives −41.73 K. Neither moves it.
 >
-> **14a — the heating at small dt is f32 conditioning in the constrained
-> velocity re-read. Confirmed three ways.**
+> **And a configurational observable could not settle it at this precision.**
+> ⟨U⟩ over 60 ps differs between the engines by 28 / 68 / 31 kJ/mol at 1 / 2 / 4
+> fs against SEMs of ~8 — 2.6σ to 5.9σ, and non-monotonic. Notably at 4 fs the
+> kinetic estimator says this port is 10.7 K *colder* while ⟨U⟩ says it is
+> ~31 kJ/mol *hotter*, which is inconsistent with a uniformly colder ensemble;
+> but resolving it properly needs about 16× the sampling. The sampling-point
+> result above makes that unnecessary.
 >
-> 1. *Not structural.* The host integrator is f64 throughout and its NVE drift
->    **falls** with dt — 4 fs −9.448, 2 fs −0.584, 1 fs +0.063, 0.5 fs +0.089
->    kJ/mol/ns/atom — flattening at an f64 floor, as a correct integrator should.
->    The device, same splitting, rises. So the splitting is not at fault.
-> 2. *It needs the constraints.* GPU NVE, neighbour list rebuilt every step
->    (0 skin violations), same warm start, `tools/gpu/review-14-localise.mjs`:
+> **The fix, specified and measured but not applied.** The two velocities differ
+> by exactly `(halfStep/m)·F`, so the earlier estimator is recoverable from
+> quantities already read back:
 >
->    | dt | constraints `HBonds` | constraints `none` |
->    |---|---|---|
->    | 1 fs | ~2.2 | −1.045 |
->    | 0.5 fs | **258.7** | −2.038 |
->    | 0.25 fs | **1811** | −1.046 |
+> ```
+>   dt/fs   post-kick (shipped)   reconstructed pre-kick   true pre-kick
+>       1        309.87                312.45                 312.40
+>       2        303.13                314.99                 314.80
+>       4        271.98                316.83                 316.08
+> ```
 >
->    With constraints off, `v = (x − reference)/halfStep` never executes and the
->    scaling vanishes — flat and small. With them on it rises ×840 over a 4×
->    reduction in dt.
-> 3. *The arithmetic agrees in direction and scale.* One ulp near 2.82 nm is
->    2.4e-7 nm, and the error is `span·eps` **independent of the step size**, so
->    dividing by a smaller `halfStep` makes the velocity kick proportionally
->    larger. Measured per-step velocity error at the fixture's box span:
->    **5.89e-5 nm/ps**, against a hydrogen's thermal 1.6 nm/ps.
+> agreeing to 0.2–0.8 K, the residual being RATTLE. On the **host** that is a
+> few lines. On the **device** it is not free: `energy()` gets its kinetic energy
+> from a device reduction that is handed velocities only, so the shader would
+> have to take the forces and the half step and subtract before squaring — a
+> contained kernel change, but a kernel change, and it alters a user-visible
+> number. That is a deliberate choice about which estimator to publish, so it is
+> left for the owner:
 >
-> 🔴 **AND THE RE-READ IS ALGEBRAICALLY CORRECT, WHICH IS WHY NO REVIEW OF THE
-> PHYSICS WOULD FIND IT.** `positions − reference` is `h·v + correction`, so the
-> re-read is exactly `v += correction/h` — the same expression OpenMM uses. It is
-> not a wrong formula; it is a right formula evaluated by subtracting two
-> box-spanning numbers to obtain a small one. In exact arithmetic the two forms
-> are indistinguishable, so only a precision argument or a differential
-> measurement can see it.
+> - **match OpenMM** (report one half kick earlier) so the two are directly
+>   comparable — this port's bias becomes +3 K at 4 fs instead of −6 K;
+> - or **report both**, and say in the panel which is which.
 >
-> 🔴 **SO IT GETS WORSE FOR BIGGER SYSTEMS, WHICH NOTHING IN THE DOCS SAYS.** The
-> error is `span·eps/h`, so it grows linearly with the box. Measured velocity
-> error per step against the delta form:
->
-> | box span | shipped | delta form | gain |
-> |---|---|---|---|
-> | 0.5 nm | 7.06e-7 nm/ps | 7.23e-9 | 98× |
-> | 2.82 nm (the test fixture) | **5.89e-5** | 7.23e-9 | **8100×** |
-> | 35 nm | 8.95e-4 | 7.23e-9 | 120000× |
->
-> **The fix: constrain the displacement, not the position.** OpenMM keeps a
-> `posDelta` array, applies constraints to *it*, then does
-> `v += (delta − oldDelta)/dt` and `x += delta`. A displacement of ~1e-3 nm held
-> in its own f32 carries relative precision, so the velocity error drops to
-> ~7e-9 nm/ps. This changes no dynamics — the two forms are algebraically equal —
-> but it touches `cpu/integrate/constraints.js` and the WGSL SHAKE/RATTLE kernel,
-> so it is a structural change and should be taken deliberately.
-> Note the single-component estimate above (1e-3 kJ/mol/ns/atom) is far below
-> the measured 2–1800: the toy model counts one kick per step where the real
-> solver re-rounds per constraint per SHAKE iteration. It predicts the direction
-> and the scaling, not the magnitude, and is quoted only for the former.
->
-> **14b — the cooling at large dt is NOT this line, and is still unexplained.**
-> Two hypotheses tested and refuted:
-> - *That OpenMM corrects its kinetic-energy estimator and RainMD does not.*
->   Measured: OpenMM's reported kinetic energy for `LangevinMiddleIntegrator` is
->   **exactly** the raw on-step value, difference `+0.00` at 0.5/1/2/4 fs.
-> - *That the re-read imposes a chord average, under-reading KE by `sinc²`.*
->   Refuted algebraically: with no constraints the re-read returns `v` unchanged,
->   so there is no chord. A `sinc²` fit with one free parameter matched three
->   points to within 3 K and was numerology.
->
-> What remains: a host f64 sweep on `ala-vac` shows a dt-dependent cooling
-> **with constraints switched off**, so a structural O(dt²) term exists
-> independent of the re-read — most likely BAOAB's intrinsic on-step kinetic
-> bias. But OpenMM is flat on the *solvated* system where RainMD cools by −2.15
-> and −6.68 K (ratio 3.1 ≈ dt²), and both claim the same splitting and the same
-> estimator, so the gap is unaccounted for. Remaining candidates, untested: the
-> three RATTLE calls per step against OpenMM's one velocity projection, and
-> where in the BAOAB cycle velocities are read for reporting.
->
-> 🔴 **AND THAT HOST SWEEP CARRIES AN ARTEFACT WORTH PROMOTING.** Its large
-> positive offsets at small dt (+19 K at 0.5 fs) are mostly finding **N63a**, the
-> unearned `−3` for a COM removal that does not exist: on a 22-atom vacuum
-> molecule 3 dof is 6% of 51. N63a is negligible **only because the shipped
-> fixtures are large** — it is +0.37 K on 1190 atoms and +17 K on 22. Anyone
-> running a small or vacuum system gets a materially wrong temperature.
-
-**`webgpu/kernels/integrate.js:271-277`** and **`cpu/integrate/langevin.js:143-151`** —
-after SHAKE, both paths **overwrite** the velocity with the half-step chord:
-
-```wgsl
-let inverseStep = 1.0 / integrator.halfStep;
-velocities[atom * 3u] = (positions[atom * 3u] - reference[atom * 3u]) * inverseStep;
-```
-
-`(positions − reference)` is a difference of box-spanning f32 coordinates,
-re-rounded on every one of up to 17 SHAKE iterations, and it is then divided by
-the half-step. Measured, NVT on `ala-wat` at the notebooks' friction of 1/ps,
-DOF 2391, against OpenMM `LangevinMiddleIntegrator` on the identical system:
-
-| dt | RainMD mean T | offset | OpenMM LangevinMiddle |
-|---|---|---|---|
-| 0.5 fs | **311.44** (sd 9.40, 40 ps) | **+13.44** | — |
-| 1 fs | 297.82 ± 0.65 | −0.18 | — |
-| 2 fs | 295.85 ± 0.62 | −2.15 | 297.53 (−0.47) |
-| 4 fs | 291.32 ± 0.83 | **−6.68** | 299.03 (+1.03) |
-
-At friction 10/ps, where the error bars tighten (n_eff ≈ 1350), RainMD gives
-296.76 ± 0.24 at 2 fs and 291.37 ± 0.23 at 4 fs against OpenMM's 300.10 ± 0.23
-and 301.57 ± 0.23 — a **14σ** and **32σ** disagreement under identical settings.
-
-The NVE arm isolates the energy injection, with the neighbour list rebuilt
-**every step** so staleness cannot contribute (0 skin violations):
-
-| dt | RainMD drift (kJ/mol/ns/atom) | OpenMM `VerletIntegrator`, same system |
-|---|---|---|
-| 0.5 fs | **+703** (T 304 → 1020 K in 10 ps) | — |
-| 1 fs | **+24.2** (T 301 → 1409 K over 50 ps) | **−0.0102** |
-| 2 fs | +0.82 | **−0.0018** |
-| 4 fs | −0.53 | −0.0138 |
-
-The oracle on the same force field, cutoff, PME and `HBonds` constraints is
-**2000-70000× better**, so this is neither the hard LJ cutoff nor the model.
-
-🔴 **THE MECHANISM IS ONLY PARTLY ACCOUNTED FOR, AND THE REPORT SHOULD NOT
-PRETEND OTHERWISE.** Rounding alone predicts a per-step energy going as `1/h²`
-and a per-ns rate going as `1/h³`, i.e. 8× per halving of dt. The measured rate
-rises **29× per halving** (0.82 → 24.2 → 703). An unexplained factor of ~3.6 per
-halving remains. Finding S18b is the likely remainder: the SHAKE stall break exits
-*above* the f32 floor and its residual is **worse at small dt** (1.31e-4 at 1 fs
-against 1.23e-4 at 4 fs), so `positions − reference` carries real constraint
-error on top of the rounding, and that error grows in the same direction. Direct
-arithmetic supports the rounding half: one ulp near 2.82 nm is 2.4e-7 nm, which
-over a half-step of 0.001 ps is a 2.4e-4 nm/ps kick, giving ≈ 0.23 kJ/mol/atom/ns
-at 2 fs against the measured 0.82 — right order, same sign.
-
-For comparison, OpenMM accumulates both half-drifts into one `posDelta`, applies
-the position constraint **once** per step, and corrects velocities as
-`velocity += (delta − oldDelta)·invDt` with no separate velocity constraint.
-RainMD applies SHAKE after **each** half-drift, overwrites `v`, and runs RATTLE
-three times per step (`webgpu/kernels/integrate.js:481-487`). That this is the
-cause of the excess is **plausible, not confirmed**; the effect is confirmed.
-
-**Failure scenario.** A user picks 0.5 or 1 fs because it is the conservative
-choice — it is the first entry in the notebooks' own dropdown, and
-`index.html:73` has `min="0.5"` and no maximum. At 0.5 fs their NVT run sits
-13 K above the setpoint; at 4 fs, 7 K below. **The error is non-monotonic, so
-there is no correction a reader can apply**, and the best agreement (1 fs) is a
-coincidence of two errors cancelling. The repo's only thermostat gate is
-`Math.abs(meanTemperature - 298) < 25` over 400 steps
-(`tools/gpu/check-integrator.mjs:218`), which passes for every row above.
-
-**Blast radius: every run at every timestep. The shipped 2 fs default is off by
-−2.15 K (0.7%), which is small; the endpoints of the range the page offers are
-off by 13 K and 7 K.**
+> Either way the sampled ensemble was never in question, which is the thing a
+> user actually needed to know and the reason this was worth chasing past three
+> refuted hypotheses.
 
 ## 15. The documented energy drift is the initial slope of a super-linear process
 
