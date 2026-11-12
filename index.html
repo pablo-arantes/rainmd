@@ -250,13 +250,16 @@
     neighbour list, direct-space nonbonded and PME all run on your GPU and
     reproduce OpenMM's total energy to 1.5&times;10<sup>&minus;6</sup> and its
     per-atom forces to 8.8&times;10<sup>&minus;5</sup>. The button above runs the
-    bonded differential test on your own hardware; <code>npm run test:gpu</code>
-    runs all five.</p>
+    composed force path and the integrator against the host reference on your own
+    hardware; <code>npm run test:gpu</code> runs all fourteen.</p>
     <p>Minimisation, dynamics, the constraint solver and the barostat all run on
-    the device, and a block of steps is encoded into one command buffer so nothing
-    in a step reads back to the browser. Measured on a 1190-atom test system:
+    the device, and a block of steps is encoded into one command buffer, so there
+    is no per-step round trip. In NPT, which is the default, the barostat is the
+    exception: a Metropolis test is a decision about a number, so the trial
+    energy comes back once per volume move &mdash; every 25 steps by default, at a
+    measured 0.167&nbsp;ms per step. Measured on a 1190-atom test system:
     <strong>1.30&nbsp;ms per step, about 133&nbsp;ns/day</strong> on the shipped
-    defaults — NPT at 2&nbsp;fs — with an energy drift of 0.30&nbsp;kJ/mol per ns
+    defaults — NPT at 2&nbsp;fs — with an energy drift of 0.48&nbsp;kJ/mol per ns
     per atom over 20&nbsp;ps. <strong>Throughput falls with system size</strong>:
     the same solute in a 12&nbsp;Å water box is 2854 atoms and 74&nbsp;ns/day, so
     an alanine dipeptide built with the notebooks' padding is tens of ns/day

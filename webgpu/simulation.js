@@ -49,6 +49,7 @@ import {
 } from "../shared/units.js";
 import { dispersionCoefficients, dispersionEnergy } from "../shared/dispersion.js";
 import { uniformAt } from "../shared/random.js";
+import { NonFiniteStateError } from "../shared/finite.js";
 import { encodeVolumeScale, metropolisWeight } from "./kernels/barostat.js";
 
 /**
@@ -129,6 +130,14 @@ export class GpuSimulation {
     this.barostatInterval = options.barostatInterval ?? 25;
     this.volumeScale = null;
     this.barostatAttempts = 0;
+    // 🔴 A HIGH-WATER MARK, BECAUSE `required` IS CLEARED AT EVERY REBUILD.
+    // `#encodeForces` clears it inside the command buffer, so the value the
+    // host reads is the LAST rebuild's requirement, not the block's worst - an
+    // overflow at one rebuild had vanished from the diagnostics by the time
+    // anyone looked. Measured: required 1519 of 1499 at V = 29.20 nm3, then
+    // "ok" at 1482 one step later.
+    this.worstNeighbourRequired = 0;
+    this.neighbourGrowths = 0;
     this.barostatAccepted = 0;
     this.barostatWindow = { attempts: 0, accepted: 0 };
     this.boxVectors = Float64Array.from(system.boxVectors ?? []);
@@ -155,7 +164,17 @@ export class GpuSimulation {
     this.skin = options.skin ?? skinFor(system, {
       timestep: options.timestep, temperature: options.temperature,
     });
-    this.plan = planCellList(system, { skin: this.skin });
+    // 🔴 THE CAPACITY CONTROLS ARE FORWARDED, WHICH THEY WERE NOT. A caller
+    // could not raise `neighbourSlack` or pin `maxNeighbours` at all: this
+    // called `planCellList(system, { skin })` and dropped both. That also made
+    // a mid-run overflow impossible to provoke on purpose, so the detection
+    // path below could not be tested - which is a large part of why it was
+    // missing.
+    this.plan = planCellList(system, {
+      skin: this.skin,
+      neighbourSlack: options.neighbourSlack,
+      maxNeighbours: options.maxNeighbours,
+    });
     this.pme = pmeParameters({
       boxVectors: system.boxVectors,
       cutoff: system.options.cutoff,
@@ -209,7 +228,13 @@ export class GpuSimulation {
       // neighbour list was last built, which is a different lifetime entirely.
       rebuildOrigin: keep(allocator.allocate("rebuildOrigin", atoms * 12,
         STORAGE | GPUBufferUsage.COPY_DST)),
-      displacement: keep(allocator.allocate("displacement", 4, READABLE)),
+      displacement: keep(allocator.allocate("displacement", 8, READABLE)),
+      // 🔴 THE CONSTRAINT CORRECTION, SO THE VELOCITY UPDATE NEVER DIFFERENCES
+      // TWO BOX-SPANNING COORDINATES. See the note in the shake shader: the old
+      // form was algebraically right and badly conditioned, and the error it
+      // injected grew as the box did.
+      corrections: keep(allocator.allocate("corrections",
+        atoms * 12, STORAGE)),
       // 🔴 ALLOCATED EVEN WHEN THERE ARE NO RESTRAINTS, at one slot. A zero
       // length buffer is invalid in WebGPU, and making the whole resource table
       // conditional would put a branch in every bind group that reads it.
@@ -355,7 +380,11 @@ export class GpuSimulation {
       // only ever shrink. A mutation that leaves a number almost right while
       // disabling the mechanism it feeds is the kind a differential test on the
       // number alone cannot see.
-      encoder.clearBuffer(resources.displacement.buffer);
+      // 🔴 ONLY WORD 0, WHICH IS THE SINCE-THE-REBUILD SLOT. Clearing the
+      // whole buffer here is what made the host's measurement cover only the
+      // steps since the last rebuild in the block: word 1 is the block's
+      // high-water mark and must survive every rebuild inside it.
+      encoder.clearBuffer(resources.displacement.buffer, 0, 4);
     }
     // Every step, because the maximum over the whole rebuild period is what the
     // skin has to cover, and an atom can move out and back inside one block.
@@ -430,6 +459,12 @@ export class GpuSimulation {
       const validation = new DeferredValidation(this.device, "run");
       validation.begin();
       const encoder = this.device.createCommandEncoder({ label: `rainmd.run.${steps}` });
+      // 🔴 THE BLOCK'S HIGH-WATER SLOT IS CLEARED ONCE, HERE. Word 0 is reset at
+      // every rebuild inside the block below; word 1 survives them and so
+      // records the worst per-interval displacement anywhere in this block,
+      // which is the quantity the host is entitled to report. Clearing it here
+      // rather than after the read keeps it inside the command buffer.
+      encoder.clearBuffer(this.resources.displacement.buffer, 4, 4);
       for (let index = 0; index < steps; index += 1) {
         const rebuild = this.stepsSinceRebuild >= this.rebuildInterval;
         if (rebuild) this.stepsSinceRebuild = 0;
@@ -441,9 +476,28 @@ export class GpuSimulation {
       this.device.queue.submit([encoder.finish()]);
       validation.end(`block of ${steps}`);
       await validation.settle();
-      // The block boundary already synchronises for validation, so reading one
-      // u32 here costs nothing a step pays for.
+      // The block boundary already synchronises for validation, so reading two
+      // u32s here costs nothing a step pays for.
       await this.#checkSkin(steps);
+      // 🔴 AND CHECK THE NEIGHBOUR CAPACITY, WHICH ONLY `initialise()` DID.
+      // `grownPlan` and `NeighbourOverflowError` both existed and were
+      // unreachable from `run()`, so an overflow mid-run dropped pairs at
+      // ARBITRARY distances - whatever the cell stencil enumerated last, not
+      // pairs at the cutoff - and `missedPairForceBound` does not bound those.
+      // Measured against an f64 all-pairs host loop at identical coordinates,
+      // a 973-of-840 overflow cost 43.56 kJ/mol of LJ, 42.12 of Coulomb and a
+      // worst force component of 2803 kJ/mol/nm, with rms force error 9.8e-3
+      // against 1.1e-6 for the control. `run()` threw nothing.
+      //
+      // The readback is one u32 at a boundary that already synchronises for
+      // validation, so it costs what `#checkSkin` costs: nothing a step pays
+      // for. On overflow this grows and rebuilds, which is what the init path
+      // has always done - and counts it, because the block that overflowed
+      // computed its forces from a truncated list and was not exact.
+      const neededNow = await this.#checkNeighbourCapacity();
+      if (neededNow > this.worstNeighbourRequired) {
+        this.worstNeighbourRequired = neededNow;
+      }
       remaining -= steps;
       this.stepsSinceBarostat += steps;
       await yieldToBrowser();
@@ -467,8 +521,41 @@ export class GpuSimulation {
    * invalid says so in its own diagnostics rather than looking clean.
    */
   async #checkSkin(steps) {
-    const squared = (await readBuffer(this.device, this.allocator,
-      this.resources.displacement, 4, Float32Array))[0];
+    // 🔴 SLOT 1, THE BLOCK MAXIMUM - NOT SLOT 0, WHICH IS ONLY THE STEPS SINCE
+    // THE LAST REBUILD IN THIS BLOCK. Reading slot 0 understated every
+    // user-facing staleness number by 2.3x to 5.2x purely by the choice of
+    // submit granularity. Controlled measurement, the same 100 steps with a
+    // rebuild every 4 and only the submit boundary moved - final position
+    // checksum identical to 13 digits in all three, so nothing about the
+    // physics changed:
+    //
+    //   blockSize   4 : 25 violations, worst usage 47.23, bound 5.649
+    //   blockSize  20 :  5 violations, worst usage 20.34, bound 1.346
+    //   blockSize 100 :  1 violation , worst usage 16.37, bound 1.077
+    //
+    // And it got worse exactly when it mattered: after a violation the interval
+    // halves, so the fraction of the block the host could see fell further.
+    const words = await readBuffer(this.device, this.allocator,
+      this.resources.displacement, 8, Float32Array);
+    const squared = Math.max(words[1], words[0]);
+    // 🔴 BEFORE THE ARITHMETIC, NOT AFTER IT. A non-finite position makes this
+    // reduction non-finite, so this one `u32` is a free whole-state finiteness
+    // check at every block - see shared/finite.js for why the bit pattern
+    // always wins the `atomicMax`. It has to come first because `NaN` poisons
+    // every line below it: `Math.sqrt(Math.max(NaN, 0))` is `NaN`, which leaves
+    // `worstDisplacement` at 0 while failing `usage <= 1`, so a dead run
+    // reported "worst displacement 0 pm - 0% of the budget used" and "stale for
+    // 300 of 300 steps" as consecutive lines, and the rebuild interval was
+    // driven to 1 so it also got 20x slower and read as a performance problem.
+    if (!Number.isFinite(squared)) {
+      throw new NonFiniteStateError({
+        what: "the maximum atomic displacement over the last block",
+        step: this.step,
+        detail: `The block of ${steps} steps that ended at step ${this.step} is `
+          + "the last one that may have been valid; everything written during "
+          + "it should be discarded too.",
+      });
+    }
     const worst = Math.sqrt(Math.max(squared, 0));
     if (worst > this.worstDisplacement) this.worstDisplacement = worst;
     // A pair outside the list closes by at most the sum of two displacements.
@@ -572,10 +659,30 @@ export class GpuSimulation {
    */
   async #updateBox(vectors) {
     this.boxVectors = Float64Array.from(vectors);
+    // 🔴 THE CAPACITY IS RE-ESTIMATED FOR THE NEW BOX, NOT CARRIED FORWARD.
+    // This passed `maxNeighbours: this.plan.maxNeighbours` - the estimate made
+    // from the box at CONSTRUCTION - so a barostat compressing the system
+    // raised the density while the neighbour capacity stayed where it started.
+    // Measured on ala-wat-big, contracted in <=5% volume steps the way a
+    // barostat goes: required crossed the 1499 capacity at V = 29.20 nm3, which
+    // is 97.7 atoms/nm3 - exactly TIP3P density, where the shipped NPT
+    // equilibration is documented to land. Taking the larger of the two keeps
+    // the buffer from churning when the box expands again.
+    const estimate = planCellList(this.system, {
+      skin: this.plan.skin, boxVectors: this.boxVectors,
+    });
+    const capacity = Math.max(this.plan.maxNeighbours, estimate.maxNeighbours);
     const plan = planCellList(this.system, {
-      skin: this.plan.skin, maxNeighbours: this.plan.maxNeighbours,
+      skin: this.plan.skin, maxNeighbours: capacity,
       boxVectors: this.boxVectors,
     });
+    if (capacity > this.plan.maxNeighbours) {
+      this.resources.neighbours.release();
+      this.held.splice(this.held.indexOf(this.resources.neighbours), 1);
+      this.resources.neighbours = this.#keep(this.allocator.allocate("neighbours",
+        this.atomCount * capacity * 4, usages().STORAGE));
+      this.neighbourGrowths = (this.neighbourGrowths ?? 0) + 1;
+    }
     const geometryChanged = plan.counts.join(",") !== this.plan.counts.join(",");
     if (geometryChanged) {
       for (const name of ["cellCount", "cellStart"]) {
@@ -626,6 +733,37 @@ export class GpuSimulation {
       total += bonded[atom] + nonbonded[atom] + nonbonded[atomCount + atom];
     }
     for (const value of partials) total += value;
+
+    // 🔴 THE POSITIONAL RESTRAINT BELONGS IN HERE, AND IT WAS MISSING FROM THE
+    // ONE PLACE IT MATTERS. This function is what `attemptVolumeChange` feeds
+    // to `metropolisWeight`, and it summed bonded + LJ + direct + reciprocal +
+    // self + dispersion and never read `resources.restraintEnergies` -
+    // while `energy()`, which only REPORTS, did. So through the whole shipped
+    // NPT equilibration the reported potential was right and the accept/reject
+    // decision was wrong. OpenMM's MonteCarloBarostat takes
+    // `getState(State::Energy, ..., integrator.getIntegrationForceGroups())`,
+    // which includes the notebooks' own `CustomExternalForce`.
+    //
+    // 🔴 AND IT IS A BIAS ON THE VOLUME, NOT A SYMMETRIC PENALTY. Centroid
+    // scaling sends each displacement d0 -> d0 + (s-1)R, so the restraint
+    // energy picks up 2k(s-1)*sum(d0.R) - linear in (s-1), so directional - as
+    // well as k(s-1)^2*sum(|R|^2), which resists any move. Dropping both means
+    // the barostat neither feels the restraint's resistance to changing the
+    // volume nor its preferred direction. Measured at the page's own
+    // equilibration settings the omitted term was 6.906 kJ/mol, about 2.8 kT,
+    // against a whole Metropolis weight of -2.510.
+    //
+    // 🔴 `#encodeForces` ALREADY ENCODED THE RESTRAINT PASS, so the trial
+    // FORCES carried it and only the energy sum did not - which is why the
+    // trajectory looked right. Nothing in the output showed it.
+    const restraintSlots = this.restraints.atoms.length;
+    if (restraintSlots > 0) {
+      const restraintEnergies = await readBuffer(this.device, this.allocator,
+        this.resources.restraintEnergies, restraintSlots * 4, Float32Array);
+      for (let slot = 0; slot < restraintSlots; slot += 1) {
+        total += restraintEnergies[slot];
+      }
+    }
     return total;
   }
 
@@ -976,6 +1114,32 @@ export class GpuSimulation {
     }
     const potential = bondedTotal + lennardJones + dispersion + coulomb
       + restraintEnergy;
+    // 🔴 THE SECOND DETECTOR, AND IT IS NOT REDUNDANT. `#checkSkin` sees
+    // positions; this sees the energies and the kinetic sum, so it catches a
+    // velocity that went non-finite in the step before the positions followed
+    // it, and it catches a first evaluation that was already infinite - two
+    // atoms at the same coordinate give `Inf` before any step has run, where
+    // there is no displacement to reduce yet.
+    //
+    // 🔴 DELIBERATELY NOT IN `#evaluatePotential`, which the minimiser's line
+    // search calls on trial points. A line search must be allowed to evaluate a
+    // bad step and reject it; throwing there would turn a working back-off into
+    // a failed minimisation. That path is already safe by accident worth
+    // stating: the accept test is `trial < potential`, and every comparison
+    // against `NaN` is false, so a non-finite trial is always rejected.
+    for (const [what, value] of [["the potential energy", potential],
+      ["the kinetic energy", kinetic]]) {
+      if (Number.isFinite(value)) continue;
+      throw new NonFiniteStateError({
+        what,
+        step: this.step,
+        detail: this.step === 0
+          ? "This was the first force evaluation, before any step ran, so the "
+            + "input itself is what cannot be evaluated - not the dynamics."
+          : "Measured at a reporting interval, so the blow-up happened "
+            + "somewhere in the block that ended here.",
+      });
+    }
     return {
       step: this.step,
       time: this.step * this.timestep,
@@ -1048,6 +1212,10 @@ export class GpuSimulation {
       worstStalledResidual: words[3] / 1e9,
       neighbourRequired: required,
       neighbourCapacity: this.plan.maxNeighbours,
+      // The worst requirement seen at any block boundary of this run, not just
+      // the last rebuild's - see the note beside worstNeighbourRequired.
+      worstNeighbourRequired: this.worstNeighbourRequired,
+      neighbourGrowths: this.neighbourGrowths ?? 0,
       // 🔴 `skinViolations > 0` MEANS THE RUN WAS WRONG FOR A WHILE, not that a
       // threshold was approached. It counts blocks over which some atom moved
       // far enough that the neighbour list could have been missing a pair

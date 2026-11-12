@@ -3,19 +3,26 @@
 ### → **[Run it: pablo-arantes.github.io/rainmd](https://pablo-arantes.github.io/rainmd/)**
 
 Molecular dynamics that runs **in your browser**, on your own GPU, from the
-AMBER topology you already have. No install, no queue, no upload.
+AMBER topology you already have. No install and no queue.
 
-Nothing leaves your machine: the page is static files, the simulation runs on
-your GPU, and the trajectory is written in your browser. There is no server to
-send a structure to. If you have no AMBER files to hand, the page offers the
-systems this repository tests itself against — the solvated alanine dipeptide
-runs a real NPT simulation on arrival.
+Nothing leaves your machine unless you ask it to: the page is static files, the
+simulation runs on your GPU, the trajectory is written in your browser, and
+opening the page makes no network request at all. There is nowhere a structure
+is sent by default. The one exception is deliberate and opt-in — a **Share to
+LogMD** button that posts frames to a third party, which the page itself
+explains before you press it. If you have no AMBER files to hand, the page
+offers the systems this repository tests itself against; load one and the
+solvated alanine dipeptide runs a real NPT simulation.
 
 Needs a browser with WebGPU: Chrome or Edge 113+, or Safari 18+. On Linux,
 Chrome may still need `--enable-unsafe-webgpu`.
 
 The simulation is GPU-resident: forces *and* integration run on the device, and
-nothing in a step reads back to the host. It reproduces OpenMM's energies to
+a block of steps is encoded into one command buffer, so there is no per-step
+round trip. In NPT — which is the default — the barostat is the one exception:
+a Metropolis test is a decision about a number, so the trial energy comes back
+to the browser once per volume move, every 25 steps by default. Measured, that
+costs 0.167 ms/step. It reproduces OpenMM's energies to
 1.5e-6 and its per-atom forces to 8.8e-5 on the notebooks' own configuration,
 and runs the 1190-atom test system at **about 133 ns/day** on an Apple laptop
 GPU — roughly 60x the host reference it is checked against. Throughput falls
@@ -36,10 +43,12 @@ structure, then **production** in NPT with the restraint off. Durations are in
 nanoseconds, trajectory intervals in picoseconds, and the page tells you what
 each stage will cost at a rate it measures on your own system — because the
 honest answer for a solvated protein is often days, and you should see that
-before you start. The viewer reads the simulation's own position buffer,
-so drawing a frame copies nothing to the host. In NPT at 1 bar it took the test
-system's deliberately underdense tleap box from 0.587 to **0.992 g/cm³** — TIP3P
-water is about 0.98.
+before you start. In NPT at 1 bar it took the test
+system's deliberately underdense tleap box from 0.587 g/cm³ to **1.001 ± 0.013
+g/cm³** over 300 ps, against OpenMM's 0.9997 ± 0.014 on the same system — and
+the volume *fluctuation* implies an isothermal compressibility of 4.8e-5 /bar
+against water's experimental 4.5e-5, which is the sharper test of the two.
+TIP3P wants about 0.98–1.00.
 
 **And you watch the analysis, not just the structure.** While the run is going
 the page draws six live panels — RMSD, radius of gyration, potential energy,
@@ -117,8 +126,8 @@ Every claim in [docs/STATUS.md](docs/STATUS.md) is a command.
 npm run check:openmm      # per-term host energies and forces against OpenMM
 npm run check:gradients   # every analytic force against a numerical gradient
 npm test                  # the host suite
-npm run test:gpu          # all nine kernel checks, through Dawn
-npm run test:gpu:page     # the same nine, in a real headless Chrome
+npm run test:gpu          # all thirteen kernel checks, through Dawn
+npm run test:gpu:page     # the same thirteen, in a real headless Chrome
 npm run check:mdanalysis  # the live metrics against MDAnalysis, on a DCD this wrote
 node tools/run-reference-md.mjs 200    # a short simulation on the host oracle
 npm run run:gpu -- --steps=2000       # a real GPU run, writing /tmp/rainmd-run.dcd
@@ -133,7 +142,7 @@ evaluation* and silently abandons the rest of the file — handlers unregistered
 debug handle unassigned, and a page that still looks fine because the device
 panel was filled by an earlier statement. The test diffs the two files.
 
-The five GPU checks are layered so a failure localises itself:
+The GPU checks are layered so a failure localises itself:
 
 | | |
 |---|---|
@@ -214,4 +223,11 @@ field is AMBER's, via **[AmberTools](https://ambermd.org/AmberTools.php)**.
 MIT for the code; see `LICENSE`. Force-field parameters are not covered by it —
 AMBER's remain under their own terms, and this repository redistributes none of
 them beyond the small test systems under `test/fixtures/`, every one of which
-`tools/oracle/make_fixtures.sh` regenerates from a local AmberTools.
+`tools/oracle/make_fixtures.sh` builds from a local AmberTools — with two
+caveats it would be dishonest to leave out. The two solvated systems place their
+ions with `addIonsRand`, so a rebuild is an *equivalent* system rather than a
+byte-identical one; every other fixture rebuilds byte-for-byte apart from the
+`%VERSION` date stamp. And `two-body.prmtop` is **not** built by that script: its
+recipe was never recorded and could not be recovered, so it is listed as a known
+exception in `test/amber-parse.test.js`, which fails if that list and the
+directory ever disagree.

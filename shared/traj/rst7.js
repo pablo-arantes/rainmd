@@ -14,6 +14,7 @@
  * wrong.
  */
 import { AMBER_VELOCITY_SCALE, NM_PER_ANGSTROM } from "../units.js";
+import { NonFiniteStateError } from "../finite.js";
 
 /** `%FORMAT(6F12.7)`, which is fixed width and must stay fixed width. */
 function formatColumns(values, perLine = 6) {
@@ -21,6 +22,23 @@ function formatColumns(values, perLine = 6) {
   for (let start = 0; start < values.length; start += perLine) {
     let line = "";
     for (let index = start; index < Math.min(start + perLine, values.length); index += 1) {
+      // 🔴 AND THE WIDTH GUARD BELOW CANNOT CATCH NaN, WHICH IS WHY THIS IS
+      // SEPARATE. `Number.NaN.toFixed(7)` is the three-character string "NaN",
+      // so it passes a twelve-column test comfortably and is padded into a
+      // field that looks perfectly well formed. Measured: the writer accepted
+      // it without complaint and this port's OWN reader then refused the file
+      // it had just written - `non-numeric coordinate field "NaN" on line 3`.
+      // So the guard caught the atom that had flown away and missed the atom
+      // that had stopped being a number, and the user found out in AMBER.
+      if (!Number.isFinite(values[index])) {
+        throw new NonFiniteStateError({
+          what: "a coordinate handed to the restart writer",
+          index,
+          detail: "No restart was written. A restart is the one output that is "
+            + "fed straight back into a simulation, so writing a non-finite one "
+            + "would carry the blow-up into whatever ran next.",
+        });
+      }
       const text = values[index].toFixed(7);
       // 🔴 A COORDINATE THAT OVERFLOWS TWELVE COLUMNS MUST BE REFUSED, NOT
       // TRUNCATED. The reader slices by width, so a 13-character field shifts

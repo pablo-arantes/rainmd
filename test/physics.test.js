@@ -326,6 +326,198 @@ test("a coordinate that overflows the restart's 12 columns is refused", async ()
   );
 });
 
+test("a NaN coordinate is refused by the restart writer, which the width guard cannot catch", async () => {
+  const { writeRestart } = await import("../shared/traj/rst7.js");
+  // 🔴 THE WIDTH GUARD PASSES NaN, WHICH IS WHY THIS IS A SEPARATE ARM.
+  // `Number.NaN.toFixed(7)` is "NaN" - three characters, comfortably inside
+  // twelve - so the file was written, and this port's own reader then refused
+  // it: `non-numeric coordinate field "NaN" on line 3`. Falsified by removing
+  // the finiteness check, which makes this test fail and the round-trip below
+  // throw from the READER instead of the writer.
+  assert.throws(
+    () => writeRestart({ positions: Float64Array.from([1, Number.NaN, 0]) }),
+    /no longer a number.*restart writer/s,
+  );
+  assert.throws(
+    () => writeRestart({
+      positions: Float64Array.from([1, 2, 3]),
+      velocities: Float64Array.from([0, Number.POSITIVE_INFINITY, 0]),
+    }),
+    /no longer a number/,
+  );
+  // The width guard still does its own job, on a finite value.
+  assert.throws(
+    () => writeRestart({ positions: Float64Array.from([1e6, 0, 0]) }),
+    /does not fit the 12-column restart format/,
+  );
+  // And a finite frame is still written.
+  assert.match(writeRestart({ positions: Float64Array.from([1, 2, 3]) }),
+    /RainMD restart/);
+});
+
+test("a NaN frame is refused by the DCD writer, and the frames before it survive", async () => {
+  const { DcdWriter } = await import("../shared/traj/dcd.js");
+  // 🔴 BOTH READERS ACCEPT AN ALL-NaN DCD IN SILENCE. Measured: cpptraj reports
+  // "Read 10 frames and processed 10 frames" with no warning, and MDAnalysis
+  // loads it and reports its own n_frames. Neither will ever tell the user, so
+  // the refusal has to be here.
+  const writer = new DcdWriter({ atomCount: 2, timestep: 0.002, interval: 1 });
+  writer.appendFrame(Float32Array.from([0, 0, 0, 1, 1, 1]));
+  writer.appendFrame(Float32Array.from([0, 0, 0, 1, 1, 1.1]));
+  assert.equal(writer.frameCount, 2);
+  assert.throws(
+    () => writer.appendFrame(Float32Array.from([0, 0, 0, 1, Number.NaN, 1])),
+    /no longer a number.*DCD writer/s,
+  );
+  // 🔴 THE REFUSAL MUST NOT COST THE GOOD FRAMES. A run goes non-finite partway
+  // through, so the frames before that point are exactly the ones worth
+  // keeping - and the header is built at finish() from the real count, so the
+  // file stays self-consistent.
+  assert.equal(writer.frameCount, 2);
+  const bytes = writer.finish();
+  assert.ok(bytes.byteLength > 0);
+});
+
+test("firstNonFinite names the component, because a message naming the atom is the point", async () => {
+  const { firstNonFinite } = await import("../shared/finite.js");
+  assert.equal(firstNonFinite(Float64Array.from([1, 2, 3])), -1);
+  assert.equal(firstNonFinite(Float64Array.from([1, Number.NaN, 3])), 1);
+  assert.equal(firstNonFinite(Float64Array.from([Number.POSITIVE_INFINITY, 2])), 0);
+  assert.equal(firstNonFinite(Float64Array.from([1, 2, Number.NEGATIVE_INFINITY])), 2);
+  // An f32 array cannot hold a NaN it was not given, so the scan is exact.
+  assert.equal(firstNonFinite(Float32Array.from([0.1, 0.2])), -1);
+});
+
+test("the PME reciprocal sum matches an exact lattice sum on a SHEARED cell", async () => {
+  const { pmeParameters } = await import("../shared/pme/parameters.js");
+  const { reciprocalEnergy } = await import("../cpu/forces/pme.js");
+  const { reciprocalBoxVectors } = await import("../cpu/forces/geometry.js");
+  const { ONE_4PI_EPS0 } = await import("../shared/units.js");
+
+  // 🔴 AN EXACT k-SPACE SUM, WRITTEN FROM THE TEXTBOOK FORMULA, SHARING NO CODE
+  // WITH THE THING IT VALIDATES. The reciprocal sum was transposed - built from
+  // the COLUMNS of the inverse box where `fractional` indexes its ROWS - and
+  // nothing in this repository could see it:
+  //   - every fixture was rectangular, where the inverse box is diagonal and a
+  //     matrix equals its transpose, so the error was exactly zero;
+  //   - the WGSL kernel carried the same construction as its host reference, so
+  //     the differential test between them agreed about a shared error;
+  //   - and no gradient check can ever catch it, because the wave vector enters
+  //     only the kernel WEIGHTS, which do not depend on position - so the
+  //     analytic force stays the exact gradient of the WRONG energy, and a
+  //     central difference on this very box passes at 0.00e+0.
+  // The only instrument that works is an independent energy oracle on a sheared
+  // cell. The one shared dependency is `reciprocalBoxVectors`, which is checked
+  // against OpenMM's own box vectors digit for digit and is not where the bug
+  // was.
+  const exactEwald = (system, positions, alpha, nmax, rowForm) => {
+    const b = system.boxVectors;
+    const recip = reciprocalBoxVectors(b);
+    const volume = Math.abs(b[0] * b[4] * b[8]);
+    const charges = system.topology.charges;
+    const atoms = system.topology.atomCount;
+    const factor = (Math.PI * Math.PI) / (alpha * alpha);
+    let sum = 0;
+    for (let na = -nmax; na <= nmax; na += 1) {
+      for (let nb = -nmax; nb <= nmax; nb += 1) {
+        for (let nc = -nmax; nc <= nmax; nc += 1) {
+          if (na === 0 && nb === 0 && nc === 0) continue;
+          // rowForm = the correct convention; the other arm is the bug.
+          const mx = rowForm ? na * recip[0] + nb * recip[1] + nc * recip[2]
+            : na * recip[0] + nb * recip[3] + nc * recip[6];
+          const my = rowForm ? na * recip[3] + nb * recip[4] + nc * recip[5]
+            : na * recip[1] + nb * recip[4] + nc * recip[7];
+          const mz = rowForm ? na * recip[6] + nb * recip[7] + nc * recip[8]
+            : na * recip[2] + nb * recip[5] + nc * recip[8];
+          const m2 = mx * mx + my * my + mz * mz;
+          if (m2 === 0) continue;
+          const weight = Math.exp(-factor * m2) / m2;
+          if (weight < 1e-18) continue;
+          let re = 0;
+          let im = 0;
+          for (let atom = 0; atom < atoms; atom += 1) {
+            const phase = 2 * Math.PI * (mx * positions[atom * 3]
+              + my * positions[atom * 3 + 1] + mz * positions[atom * 3 + 2]);
+            re += charges[atom] * Math.cos(phase);
+            im += charges[atom] * Math.sin(phase);
+          }
+          sum += weight * (re * re + im * im);
+        }
+      }
+    }
+    // E = (1/(2 pi V)) * ONE_4PI_EPS0 * sum, because k = 2 pi m so k^2 carries
+    // 4 pi^2. Writing (2 pi / V) instead is out by exactly 4 pi^2 = 39.478, and
+    // the first version of this oracle did - caught because it disagreed with
+    // the RECTANGULAR fixture, which is why that arm is here and runs first.
+    return (1 / (2 * Math.PI * volume)) * ONE_4PI_EPS0 * sum;
+  };
+
+  const alpha = 2.6282608939112584;
+  const grid = [48, 48, 48];
+  // 🔴 THE TOLERANCE IS THE TWO ORACLES' OWN FLOORS, NOT A CHOSEN NUMBER. The
+  // exact sum converges to 1.6e-6 between nmax 8 and 11, and a 48^3 grid sits
+  // about 2e-6 from a 64^3 one, so 1e-5 is a few times the better of the two.
+  // Measured at 24^3 the grid alone costs 1.5e-4, which is why the gate does
+  // not run there.
+  const bar = 1e-5;
+  const measured = {};
+  for (const name of ["ala-wat", "ala-oct"]) {
+    const topology = parsePrmtop(read(`${name}.prmtop`));
+    const coordinates = parseInpcrd(read(`${name}.inpcrd`),
+      { expectedAtomCount: topology.atomCount });
+    const system = buildSystem(topology, {
+      nonbonded: "PME", cutoff: 1.0, constraints: "HBonds", rigidWater: true,
+      box: coordinates.box,
+    });
+    const parameters = pmeParameters({
+      boxVectors: system.boxVectors, cutoff: 1.0, alpha, grid,
+    });
+    const pme = reciprocalEnergy(system, coordinates.positions,
+      new Float64Array(topology.atomCount * 3), parameters);
+    const exact = exactEwald(system, coordinates.positions, alpha, 8, true);
+    const relative = Math.abs(pme - exact) / Math.abs(exact);
+    measured[name] = { pme, exact, relative };
+    assert.ok(relative < bar,
+      `${name}: PME reciprocal ${pme} against the exact lattice sum ${exact} `
+      + `is ${relative.toExponential(2)}, over the ${bar} floor`);
+  }
+
+  // The off-diagonal box components are what makes the second fixture a test.
+  const oct = buildSystem(parsePrmtop(read("ala-oct.prmtop")), {
+    nonbonded: "PME", cutoff: 1.0, constraints: "HBonds", rigidWater: true,
+    box: parseInpcrd(read("ala-oct.inpcrd"),
+      { expectedAtomCount: 1315 }).box,
+  });
+  const offDiagonal = Math.max(...[1, 2, 3, 5, 6, 7].map((i) => Math.abs(oct.boxVectors[i])));
+  assert.ok(offDiagonal > 0.5,
+    `ala-oct must actually be sheared, off-diagonal max ${offDiagonal}`);
+
+  // 🔴 AND THE TRANSPOSED FORM MUST FAIL HERE AND PASS ON THE RECTANGULAR BOX.
+  // Without this arm the test cannot distinguish the fix from the bug, because
+  // the bug is invisible on every other fixture in the repository.
+  const topology = parsePrmtop(read("ala-oct.prmtop"));
+  const coordinates = parseInpcrd(read("ala-oct.inpcrd"),
+    { expectedAtomCount: topology.atomCount });
+  const transposed = exactEwald(oct, coordinates.positions, alpha, 8, false);
+  const transposedError = Math.abs(transposed - measured["ala-oct"].exact)
+    / Math.abs(measured["ala-oct"].exact);
+  assert.ok(transposedError > 1e-2,
+    "the transposed wave vector must be grossly wrong on a sheared cell, or "
+    + `this test cannot see the defect it exists for - got ${transposedError}`);
+
+  const flat = parsePrmtop(read("ala-wat.prmtop"));
+  const flatCoordinates = parseInpcrd(read("ala-wat.inpcrd"),
+    { expectedAtomCount: flat.atomCount });
+  const flatSystem = buildSystem(flat, {
+    nonbonded: "PME", cutoff: 1.0, constraints: "HBonds", rigidWater: true,
+    box: flatCoordinates.box,
+  });
+  const flatTransposed = exactEwald(flatSystem, flatCoordinates.positions, alpha, 8, false);
+  assert.equal(flatTransposed, measured["ala-wat"].exact,
+    "on a rectangular box the two conventions must be BIT-IDENTICAL - that is "
+    + "why the defect survived every validated number in docs/STATUS.md");
+});
+
 test("the dispersion correction reproduces OpenMM's own value", async () => {
   const { dispersionCoefficients, dispersionEnergy } = await import("../shared/dispersion.js");
   const topology = parsePrmtop(read("ala-wat.prmtop"));

@@ -210,6 +210,68 @@ export async function main(device) {
     } finally { simulation.release(); }
   }
 
+  // ---- arm 5: the measurement must not depend on the submit granularity ----
+  //
+  // 🔴 EVERY USER-FACING STALENESS NUMBER WAS UNDERSTATED BY UP TO 5.2x BY THE
+  // CHOICE OF BLOCK SIZE. The displacement accumulator was cleared at every
+  // rebuild inside the command buffer while the host read it once per block, so
+  // the reading covered only the steps since the last rebuild in that block -
+  // and the page submits blocks of `rebuildInterval` steps while the adaptive
+  // interval starts at 4, so a 20-step block held five rebuilds and the host
+  // saw four steps of twenty. It also degraded exactly when it mattered: after
+  // a violation the interval halves, so the visible fraction shrank further.
+  //
+  // This arm encodes the SAME steps with the SAME rebuild interval and moves
+  // only the submit boundary. The physics cannot differ - the checksum proves
+  // it - so any difference in the reported maxima is measurement error.
+  {
+    const arms = [];
+    for (const blockSize of [4, 20, 100]) {
+      const simulation = await build(device, system, coordinates.positions,
+        { skin: 0.004, rebuildInterval: 4, adaptiveRebuild: false });
+      try {
+        await simulation.run(100, { blockSize });
+        const d = await simulation.diagnostics();
+        const state = await simulation.readState();
+        let checksum = 0;
+        for (let i = 0; i < state.positions.length; i += 1) {
+          checksum += state.positions[i] * (i % 97 + 1);
+        }
+        arms.push({
+          blockSize,
+          worstDisplacement: Number(d.worstDisplacement.toFixed(6)),
+          worstSkinUsage: Number(d.worstSkinUsage.toFixed(4)),
+          missedPairForceBound: Number(d.missedPairForceBound.toFixed(3)),
+          stepsWithStaleList: d.stepsWithStaleList,
+          checksum: Number(checksum.toFixed(6)),
+        });
+      } finally { simulation.release(); }
+    }
+    // The trajectory must be identical, or the arms are not comparable.
+    const sameRun = arms.every((a) => a.checksum === arms[0].checksum);
+    // 🔴 EXACT EQUALITY, NOT A TOLERANCE. The device reduces the same f32
+    // squared displacements by atomicMax in all three arms, and a maximum over
+    // the same set of values is the same bits however it is grouped. A
+    // tolerance here would hide exactly the defect this arm exists for.
+    const sameMeasurement = arms.every((a) =>
+      a.worstDisplacement === arms[0].worstDisplacement
+      && a.worstSkinUsage === arms[0].worstSkinUsage
+      && a.missedPairForceBound === arms[0].missedPairForceBound
+      && a.stepsWithStaleList === arms[0].stepsWithStaleList);
+    if (!sameRun || !sameMeasurement) failures += 1;
+    results.windowIndependentOfBlockSize = {
+      ok: sameRun && sameMeasurement,
+      sameTrajectory: sameRun,
+      sameMeasurement,
+      arms,
+      note: "before the fix these read 47.23 / 20.34 / 16.37 for the same 100 "
+        + "steps. `skinViolations` is deliberately NOT compared: it counts "
+        + "blocks that contained a violation, which the log says out loud, and "
+        + "`stepsWithStaleList` attributes the whole block - conservative, and "
+        + "now independent of how the run was submitted",
+    };
+  }
+
   return {
     check: "neighbour-list skin accounting, against the host and against itself",
     failures,

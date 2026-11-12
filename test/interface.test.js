@@ -18,6 +18,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync, existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { readdirSync } from "node:fs";
+import { join } from "node:path";
 import { kabschTransform, applyTransform, centroid } from "../shared/analysis/kabsch.js";
 import {
   buildSelections, classifyResidue, VIEW_PRESETS, BODY_COLOURS, STRUCTURE_COLOURS,
@@ -264,6 +266,71 @@ test("secondaryOfAtoms spreads a residue's assignment to all its atoms", () => {
     result.perResidue.length);
 });
 
+test("the README's privacy claim matches what the page can actually do", () => {
+  // 🔴 THE README SAID "No install, no queue, no upload" AND "Nothing leaves
+  // your machine ... There is no server to send a structure to", WHILE THE PAGE
+  // SHIPPED A BUTTON THAT POSTS FRAMES TO A THIRD PARTY. `index.html` was
+  // honest about it in its own caveat; the README never mentioned the feature,
+  // and the README is the document a reader meets first. It is also the
+  // project's central claim, which makes it the one worth a gate rather than a
+  // proofread.
+  const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+  const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
+  const whitespace = (text) => text.replace(/\s+/g, " ");
+  const flatReadme = whitespace(readme);
+
+  const shares = /id="share-logmd"/.test(html);
+  if (shares) {
+    assert.ok(/LogMD/.test(flatReadme),
+      "the page can upload frames to LogMD and the README does not mention it");
+    // An unqualified denial is the specific thing that was wrong.
+    for (const absolute of [
+      "no install, no queue, no upload",
+      "nothing leaves your machine:",
+      "there is no server to send a structure to",
+    ]) {
+      assert.ok(!flatReadme.toLowerCase().includes(absolute),
+        `the README still claims "${absolute}" while the page ships a share `
+        + "button; the claim needs its exception stated");
+    }
+    // And the qualification has to be there, not merely the word LogMD.
+    assert.ok(/unless you ask it to|opt-in|opt in/i.test(flatReadme),
+      "the README mentions LogMD but does not qualify the privacy claim");
+  }
+
+  // The other half of the claim is true and worth keeping true: opening the
+  // page must make no network request. Static check - no absolute-origin
+  // src/href, and no fetch outside an event handler.
+  const remote = [...html.matchAll(/(?:src|href)="(https?:)?\/\/[^"]*"/g)]
+    .map((m) => m[0])
+    .filter((text) => !/^href=/.test(text));
+  assert.deepEqual(remote, [],
+    `index.html loads something from the network on open: ${remote.join(", ")}`);
+});
+
+test("the page hands the DCD writer the LIVE box, not the system's", () => {
+  // 🔴 A TEXT GATE, DELIBERATELY, AND IT IS PROPORTIONATE. The mechanism is
+  // proved on the device by `npm run check:npt-box`, which writes a real NPT
+  // trajectory whose volume moves 23% and holds MDAnalysis' reading of the cell
+  // to the DCD's own float32 floor. What that cannot see is the page
+  // REGRESSING this one argument back to `system.boxVectors`, which is fixed at
+  // assembleSystem() while the barostat mutates the simulation's own copy - so
+  // every NPT file the page wrote carried the stage's starting cell, 43% wrong
+  // in volume by the end of a documented equilibration.
+  const app = readFileSync(new URL("../web/app.js", import.meta.url), "utf8");
+  const calls = [...app.matchAll(/appendFrame\(([^;]*?)\)\s*;/g)].map((m) => m[1]);
+  assert.ok(calls.length >= 2,
+    `expected the page to append frames in at least two places, found ${calls.length}`);
+  for (const call of calls) {
+    assert.ok(!/\bsystem\.boxVectors\b/.test(call),
+      `appendFrame(${call}) passes the construction-time box; under a barostat `
+      + "that is not the cell the coordinates were produced in");
+    assert.ok(/\.boxVectors\b/.test(call),
+      `appendFrame(${call}) passes no box at all; a periodic trajectory needs `
+      + "one per frame or a reader takes the first coordinates as a unit cell");
+  }
+});
+
 test("every tool and page module parses", () => {
   // 🔴 A BACKTICK INSIDE A TEMPLATE LITERAL HAS BROKEN THE HARNESS FIVE TIMES.
   // Everything the browser lane injects lives inside one, so a backtick
@@ -276,12 +343,31 @@ test("every tool and page module parses", () => {
   // check is that the file parses. `node --check` does that properly, in a
   // separate process, for every file this repository ships or runs - which
   // subsumes the backtick trap and every other syntax mistake with it.
-  const files = [
-    "tools/gpu-page.mjs", "tools/gpu-node.mjs", "tools/check-against-openmm.mjs",
-    "tools/check-force-gradients.mjs",
-    "web/app.js", "web/molstar-viewer.js", "web/plot.js", "web/viewer.js",
-    "shared/traj/logmd.js", "shared/traj/imaging.js", "webgpu/simulation.js",
-  ];
+  // 🔴 THE TREE, NOT A LIST, AND THE LIST IS WHY THIS FIRED A SIXTH TIME. The
+  // comment above said "every file this repository ships or runs" while the
+  // list named eleven of them - and left out webgpu/kernels/ entirely, which is
+  // where every WGSL template literal lives. A backtick in a comment inside
+  // webgpu/kernels/pme.js then broke all thirteen GPU modules while this test
+  // reported 65 passes. A gate whose stated scope is wider than its real scope
+  // is worse than no gate, because it is believed.
+  const root = new URL("..", import.meta.url).pathname;
+  const files = [];
+  const walk = (relative) => {
+    for (const entry of readdirSync(join(root, relative), { withFileTypes: true })) {
+      const next = `${relative}/${entry.name}`;
+      // vendor/ is minified third-party code; it is not ours to parse-check.
+      if (entry.isDirectory()) {
+        if (entry.name === "vendor" || entry.name === "node_modules") continue;
+        walk(next);
+      } else if (/\.(js|mjs)$/.test(entry.name)) {
+        files.push(next.replace(/^\//, ""));
+      }
+    }
+  };
+  for (const top of ["shared", "cpu", "webgpu", "web", "tools"]) walk(`/${top}`);
+  // If this ever drops below the count at the time of writing, the walk broke.
+  assert.ok(files.length >= 45,
+    `expected to parse-check the whole tree, found only ${files.length} files`);
   for (const file of files) {
     const result = spawnSync(process.execPath, ["--check", file], {
       cwd: new URL("..", import.meta.url).pathname,

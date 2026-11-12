@@ -33,7 +33,7 @@ Re-run them with `npm run check:openmm`, `npm run check:gradients`,
 | counter-based PRNG uniform | the host's own, in f32 and f64 | **40000/40000 bit-identical** (the 2^-24 form it replaced: 20045/40000) |
 | **one device step** | the host integrator, with the same noise *and* the same forces | positions 2.0e-6 nm, velocities 1.1e-3 nm/ps against a 4.8 nm/ps scale |
 | **constraint geometry after 5000 device steps** | the constraint lengths themselves | worst 5.0e-6 of a bond length; 17 SHAKE iterations at most; iteration cap never reached |
-| **energy conservation**, friction 0, 20 ps | a least-squares fit to the total energy | **+0.30 kJ/mol per ns per atom**, fluctuation 3.45 kJ/mol, residual about the fit 2.73 |
+| **energy conservation**, friction 0, **20 ps** (`npm run test:gpu:integrator`) | a least-squares fit to the total energy, over growing windows of one trace | **+0.484 kJ/mol per ns per atom at 20 ps**, fluctuation 6.36; the same trace gives **+0.370 at 10 ps** and **+2.63 at 4 ps**, so the figure is only meaningful beside its window — and it is **super-linear**, reaching +13.8 at 200 ps as the system heats 291 → 447 K |
 | thermostat, friction 10/ps, 400 steps | the 298 K setpoint | mean 317.8 K |
 | **DCD writer** | **byte-compared against `openmm.app.DCDFile`** | identical except the timestamp title and 2–7 ulp in the unit-cell cosines; MDAnalysis reads both files to the same 7.6e-7 Å |
 | DCD read back by **cpptraj** | a 4 ps GPU run, 40 frames | opened as "Charmm DCD", 40 frames processed, box and `dt` correct |
@@ -90,8 +90,28 @@ Re-run them with `npm run check:openmm`, `npm run check:gradients`,
 | **the browser lane waits for the page, rather than sleeping** | three consecutive runs, and a forced module-scope throw | the old fixed 2500 ms delay failed about one run in three once the module graph grew, reporting `Cannot read properties of undefined (reading 'device')` — which is indistinguishable from the real `app.js` evaluation bug. It now polls for `window.rainmd` and names the cause |
 | thermostat | 150 steps at 50/ps friction | 295.8 K against a 298 K setpoint (0.7%) |
 | **the page, in real Chrome** | headless Chrome 157 over CDP, `npm run test:page` | loads, probes `apple / metal-3`, runs the bonded kernel: energy 1.75e-8, force 7.2% of the f32 bound — **identical to the Dawn lane** |
-| **every kernel in both lanes** | the same five check modules run through Dawn and through Chrome | 0 failures in both; the full force path agrees between implementations to 1e-8 on the total |
+| **every kernel in both lanes** | the same thirteen check modules run through Dawn and through Chrome | 0 failures in both; the full force path agrees between implementations to 1e-8 on the total |
 | determinism | two independent runs of the nonbonded check | **bit-identical** energies, including the arm that reaches them via a grow-and-rebuild |
+| **a blown-up run is refused rather than completed** | `npm run test:gpu:blowup`, 40 fs on the solvated fixture | stops at step 20 with `NonFiniteStateError` naming the timestep; a 2 fs run of the same length is **not** refused and reports a finite potential and 382 K; identical in Dawn and Chrome |
+| **coincident input atoms are refused before a step runs** | one water copied onto another, so SHAKE leaves them exactly superposed | refused at step 0 by the energy detector, separation after constraint projection **0.0 nm** — the arm asserts its own premise, because moving one oxygen instead of a whole molecule is silently undone by SHAKE |
+| **the NVE drift no longer grows as the timestep shrinks** | `npm run check:timestep` — NVE at 1 / 0.5 / 0.25 fs, neighbour list rebuilt every step | drift ratio over a fourfold smaller step **2.03** against a bar of 10; it was **824**, and the end temperature now holds 299.5 / 297.4 / 299.1 K where 0.25 fs reached **398 K** |
+| **one device step against the host integrator** | the same noise and the same forces | velocities **5.76e-5 nm/ps** against a 4.79 nm/ps scale — **20× closer** than the 1.15e-3 before the constrained-velocity fix |
+| **the energy drift the docs quote is produced by the command** | `npm run test:gpu:integrator`, now 20 ps | window fits from one trace, so the figure carries its window |
+| **the staleness measurement does not depend on how the run was submitted** | `npm run test:gpu:displacement`, arm 5 — the same 100 steps at three block sizes, controller pinned | worst usage **47.2308**, displacement **0.094462 nm** and bound **5.649** identical at blockSize 4, 20 and 100, with the same trajectory checksum; the shipped window gave **47.23 / 20.34 / 16.37** |
+| **the barostat decides on the potential the run reports** | `npm run test:gpu:barostat`, restrained arm at the page's own equilibration settings | the two sums agree to **1.5e-4 kJ/mol** with a restraint of 8.44 present; with the term dropped the gap is `differenceAsFractionOfRestraint` **0.99998** — exactly the restraint energy |
+| **the neighbour capacity tracks a compressing box** | `npm run test:gpu:capacity`, `ala-wat-big` driven through the barostat's own `scaleVolume` | 65 → 103 atoms/nm³ past bulk TIP3P with capacity growing **1499 → 2367** and nothing dropped; with the carry-forward restored the capacity stays at 1499 while the requirement climbs to 1395 |
+| **an overflow is seen during a run, not only at startup** | the same check's second arm, capacity pinned to 64 | grown to 918 and the high-water mark reads 736; without the per-block check the mark stays **0**, which is how the defect looked |
+| **the README's privacy claim matches the page** | `npm test`, a claim-consistency gate | the share button's presence forces the README to name LogMD and to qualify the claim; restoring "no install, no queue, no upload" fails it |
+| **the trajectory's unit cell under NPT** | `npm run check:npt-box` — a real 4000-step NPT run read back by **MDAnalysis** | live volume walks 19.61 → 15.09 nm³ (23%) and every one of 16 frames matches to **8.3e-8**, against the DCD's float32 cell floor of ~2e-7; with the defect the error is 36% and every frame carries the same cell |
+| **ff19SB is refused by name, not run without its CMAP** | `npm test`, the flag audit; measured against OpenMM on real ff19SB systems | −5.08 kJ/mol on a capped tripeptide, −56.67 on a 30-mer; all four ff19SB variants built by tleap are refused, and ff14SB / GLYCAM / protein+glycan / `solvateOct` / 52,200 atoms still parse |
+| **4-point water is refused rather than constrained to a massless site** | the NUMEXTRA check; measured on the host | OPC and TIP4P-Ew refused; unrefused they gave **2653.6 K** at step 15 from a 298 K setpoint, with the extra points moving 0.00000 nm against a 412.9 K 3-point control |
+| **an unrecognised `%FLAG` is refused and named** | the audit against a 44-flag classification | CHAMBER, 12-6-4, polarizable, solvent cap and LES all refused by name; harmless PDB metadata still ignored |
+| **the PME reciprocal sum on a SHEARED cell** | an exact Ewald lattice sum written from the textbook formula, sharing no code with it | `ala-oct` (truncated octahedron, 1315 atoms) agrees to **2.4e-6** at a 48³ grid, the same convergence the rectangular fixture shows (1.9e-6) — and the transposed form, which was shipped, is grossly wrong there and **bit-identical** on a rectangular box |
+| **the whole tree parses** | `node --check` over every first-party `.js`/`.mjs` under `shared/ cpu/ webgpu/ web/ tools/` | 49 files; the previous version named eleven by hand and omitted `webgpu/kernels/` entirely, where every WGSL template literal lives |
+| **Stop keeps what the stage produced** | `npm run test:page:stop`, Stop pressed mid-equilibration with frames already written | trajectory kept (`equil:3`, 43 KiB), both downloads enabled, state carried to step 1040 with velocities, restart labelled `equil` and marked interrupted — falsified against the pre-fix page, which reports `trajectoryFiles []`, `trajectoryBytes 0`, both downloads disabled and `hostState` at step 0 |
+| **a blown-up stage keeps its frames and hands on nothing** | the same lane's second arm, 40 fs after the stop | the opening frame is kept (`equil:1`), the carried checksum is **unchanged to the last digit**, and the earlier stage's restart is not replaced — the opposite assertion, so the fix cannot be "keep everything" |
+| **the restart names the stage it came from** | the same lane | `<name>_equil.rst7`, and `restartStage` reports `equil` — a stopped production used to hand over the equilibration's state under `<name>.rst7` |
+| **no file this program writes can contain `NaN`** | the DCD and restart writers, host tests | both refuse a non-finite frame by name; the DCD keeps the frames written before the refusal and `finish()` still produces a readable file |
 
 Two tolerances in that table are **derived, not chosen**, which is the only kind
 worth having:
@@ -306,6 +326,628 @@ with a blank between the clear and the load. "Not working" was the right
 description of the experience and the wrong description of the cause — which is
 why the gate reads the drawn coordinate out of Mol*'s own model rather than
 trusting the atom count, which was stable and correct throughout.
+
+## Three defects that were all one missing list
+
+**The parser read the twenty-six `%FLAG` sections it names and dropped every
+other one in silence.** There was no known-flag list to compare a file against,
+no unknown-flag report, nothing. Found by a review pass; `docs/REVIEW.md` has
+the flag-by-flag audit.
+
+🔴 **SO THE NOTEBOOK'S OWN DEFAULT FORCE FIELD RAN AS A DIFFERENT ONE.**
+`Amber.ipynb`'s dropdown is
+`Force_field = "ff19SB" #@param ["ff19SB", "ff14SB"]`, and ff19SB's prmtop
+carries `CMAP_COUNT`, `CMAP_RESOLUTION`, `CMAP_PARAMETER_01` and `CMAP_INDEX`.
+None were read. Per term against OpenMM 8.4 on ACE-(ALA)₃-NME:
+
+| term | OpenMM | RainMD |
+|---|---|---|
+| HarmonicBond | +0.088778 | +0.088778 |
+| HarmonicAngle | +4.023395 | +4.023395 |
+| PeriodicTorsion | +10.022601 | +10.022601 |
+| Nonbonded | −53.246508 | −53.246507 |
+| **CMAPTorsion** | **−5.082244** | **absent** |
+| **TOTAL** | **−44.193978** | **−39.111732** |
+
+and it grows with the chain: a 30-residue ff19SB helix carries 28 CMAP terms
+worth **−56.671931 kJ/mol**. ff19SB *is* ff14SB with CMAP replacing the backbone
+torsions, so dropping it is not a perturbation of that force field — it is an
+unvalidated one. The file parsed with `warnings: []`.
+
+🔴 **AND OPC WATER REACHED 2650 K.** `NUMEXTRA` was parsed into `pointers` and
+never checked. `leaprc.water.opc` — ff19SB's recommended water, and
+`Water_type = "TIP3P" #@param ["TIP3P", "OPC"]` in both notebooks — puts one
+zero-mass `EPW` site per water, bonded to the oxygen. With no virtual-site
+support, `rigidWater` constrained the O–EP bond: **933 of 3754** distance
+constraints tied a movable oxygen to a frozen massless point. Host dynamics, 60
+steps at 2 fs, 298 K setpoint:
+
+```
+step 15  T = 2653.6 K     step 30  T = 1669.1 K     step 60  T = 1872.1 K
+max |dr|: water O 0.03187 nm, extra points 0.00000 nm, hydrogens 0.18199 nm
+control (3-point ala-wat, identical code path): 412.9 K, water O 0.15278 nm
+```
+
+**What the fix is.** `shared/amber/flags.js` classifies all 44 flags the
+fixtures carry, plus everything ParmEd's own source enumerates, into handled /
+harmless / refused-by-name. Three further refusals are **pointers rather than
+flags**, so the audit cannot see them: `NUMEXTRA`, `IFCAP` and `NCOPY`.
+
+🔴 **AN UNRECOGNISED FLAG IS REFUSED, NOT WARNED ABOUT, AND THE ASYMMETRY IS THE
+ARGUMENT.** A flag that changes the energy and is dropped produces a wrong
+answer nothing downstream reveals; a harmless flag that causes a refusal costs a
+user one message and this repository one line. A warning would not have been
+enough either — the parser already pushes a note into `topology.warnings` when
+the molecule partition disagrees with `ATOMS_PER_MOLECULE`, and the page shows
+it as one line in a scrolling log.
+
+🔴 **AND `IPOL` IS A SECTION IN MODERN FILES, IN NO POINTERS SLOT.** tleap writes
+`%FLAG IPOL` with its own value, so `pointers.IPOL` was `undefined` and the
+check meant to stop a polarizable topology would have been walked straight past.
+Every fixture here writes `IPOL 0`, which is why it had to be read rather than
+assumed.
+
+**Gated without adding a single fixture.** A prmtop carries the parameters it
+uses and AMBER's are not covered by this repository's licence, so committing an
+ff19SB or TIP4P-Ew file to test a *refusal* would redistribute parameters for a
+force field this engine declines to run. The tests append the offending flag to
+`ala-vac.prmtop` in memory instead, which tests the audit exactly and adds
+nothing. Falsified: disabling the audit fails all four arms. Verified against
+real tleap output — all four ff19SB variants and TIP4P-Ew are refused, while
+ff14SB, GLYCAM, a protein+glycan complex, `solvateOct` and a 52,200-atom box
+still parse.
+
+**What is still not covered.** A genuinely polarizable topology was never
+tested, because `leaprc.water.opc3pol` writes `IPOL 0` in this AmberTools build;
+the `IPOL` path is code-reading plus a synthetic arm, not a real file. And the
+12-6-4 refusal fires on the flag's presence — the magnitude of what would have
+been dropped is unmeasured, because no nonzero C₄ coefficients could be
+produced here.
+
+## The two open items, investigated
+
+**The sheared-cell residual was OpenMM's, not this port's.** Two independent
+oracles sharing no code with what they validate — a brute-force Lennard-Jones
+sum over 125 lattice images, and a complete Ewald sum (real-space `erfc`,
+exact k-space lattice sum, self, net charge, exclusion corrections, 1-4
+exceptions):
+
+| | independent exact | RainMD (48³) | OpenMM (48³) |
+|---|---|---|---|
+| ala-wat Coulomb (control) | −13652.474621 | **1.3e-7** | 6.2e-6 |
+| **ala-oct Coulomb** | −15596.114539 | **5.3e-8** | **1.4e-4** |
+| ala-wat LJ (control) | 1794.522906 | **3.8e-16** | 2.0e-10 |
+| **ala-oct LJ** | 2673.565469 | **1.9e-15** | **3.07e-5** |
+
+🔴 **THE RECTANGULAR CONTROL IS WHAT MAKES THAT READABLE.** There RainMD and
+OpenMM agree with *each other* to 1.2e-8 at a 24³ grid while both sit 6e-6 from
+the exact sum — the PME grid floor acting identically on two implementations of
+one algorithm. Without that arm the octahedral numbers read as this port
+drifting. At 48³ this port converges onto the exact answer and OpenMM does not.
+Gated by `npm run check:triclinic`, which is how the octahedral case is held at
+all: `check-against-openmm.mjs` cannot hold it, because on this box OpenMM is
+the one that differs.
+
+**And the cooling at large timestep is a reported-temperature question, not an
+ensemble one — probably.** Two hypotheses tested this pass, both refuted:
+
+- *The constraint schedule.* A patched host copy accumulating both half drifts
+  and constraining the whole step **once**, OpenMM's shape, against the shipped
+  double projection, in f64 so precision cannot confound it: the dt dependence
+  is the same within error, **−37.89 K** against **−40.18 K** over 1 → 4 fs.
+- *That OpenMM is flat.* It is not. Measured properly — CPU platform, minimised,
+  20 ps equilibration, 60 ps sampled:
+
+| dt | OpenMM | this port |
+|---|---|---|
+| 1 fs | 298.42 ± 0.47 (**+0.42**) | 297.98 ± 0.57 (**−0.02**) |
+| 2 fs | 299.63 ± 0.48 (**+1.63**) | 295.92 ± 0.54 (**−2.08**) |
+| 4 fs | 302.45 ± 0.51 (**+4.45**) | 291.64 ± 0.55 (**−6.36**) |
+
+Both carry an O(dt²) on-step kinetic bias and **the signs are opposite**. Both
+agree with the setpoint and with each other within error at 1 fs, so both are
+correct integrators converging to the same limit and differing in their O(dt²)
+term. That is a far narrower claim than "the ensemble is wrong", and it fits the
+exact Lyapunov result: BAOAB's *configurational* temperature is 298 K at every
+dt while its on-step *kinetic* temperature is biased.
+
+**What a user should do meanwhile:** at 2 fs the reported temperature reads
+about 2 K low and at 4 fs about 6 K low — under 1% and 2.5%. Treat the reported
+temperature as having an O(dt²) offset, and do not tune a setpoint against it.
+The remaining measurement, not done here, is a configurational temperature for
+both engines: if those agree while the kinetic estimators diverge, this is
+reporting and the sampled ensemble is sound.
+
+## Superseded: how far these got on the first pass
+
+**The direct-space Lennard-Jones sum on a sheared cell is RainMD's, not
+OpenMM's.** An independent O(N²) sum with brute-force minimal images over 125
+lattice shifts, sharing no code with `cpu/forces/nonbonded.js` and validated on
+the rectangular fixture first, gives 2673.565469 on `ala-oct` — matching RainMD
+to **1.5e-15** and differing from OpenMM by **3.07e-5**. On the rectangular
+control all three agree. So the discrepancy that showed up when the PME
+transpose was fixed is OpenMM's Reference platform departing from a true
+minimum-image sum on a truncated octahedron, not a defect here. Consistent with
+the direction (OpenMM's LJ is higher, so it includes fewer attractive pairs near
+the cutoff) and with `c→b→a` changing **0 of 863,955** cutoff verdicts on this
+box.
+
+🔴 **THE COULOMB RESIDUAL IS NOT ATTRIBUTED, AND THE TIDY EXPLANATION DOES NOT
+SURVIVE ARITHMETIC.** The obvious story is that the same boundary pairs explain
+LJ and Coulomb together, but the two discrepancies are 0.082 and 2.115 kJ/mol —
+a ratio of 25.8, where a screened Coulomb and an LJ term at r ≈ 1.0 nm for water
+pairs differ by about 3.8. Building the full independent electrostatics oracle
+(real + reciprocal + self + exclusion corrections + 1-4 exceptions) is what will
+settle it; an attempt that compared against `coulombDirect` measured nothing,
+because that field is not the screened real-space sum it was taken for.
+
+**The cooling at large timestep survived the f32 fix, as its mechanism
+predicted.** Re-measured on the device, NVT at friction 10/ps, 60 ps per step
+from one shared equilibrated start:
+
+| dt | before the f32 fix | after | OpenMM LangevinMiddle |
+|---|---|---|---|
+| 1 fs | — | 297.98 ± 0.57 | — |
+| 2 fs | 296.76 | 295.92 ± 0.54 | 300.10 ± 0.23 |
+| 4 fs | 291.37 | 291.64 ± 0.55 | 301.57 ± 0.23 |
+
+The offsets moved by about one standard error. So the two halves of that finding
+are independent defects of opposite sign: an f32 heating that grew as the step
+shrank, now fixed, and an **O(dt²)** cooling that grows as the step grows, still
+present. Zero within error at 1 fs, −2.08 at 2 fs, −6.36 at 4 fs; the 2→4 ratio
+is 3.06 against 4 for exactly quadratic. OpenMM on the same system, with the
+same splitting and — measured — the same uncorrected on-step kinetic estimator,
+is flat to within 1.6 K, so the bias is this port's.
+
+**The surviving hypothesis is a change, not a measurement.** This port applies
+SHAKE after *each* half drift and RATTLE three times a step, where OpenMM
+accumulates both half drifts into one displacement, constrains it **once** and
+corrects velocities once. Projecting along a mid-step bond direction twice
+rather than the step's once is a plausible O(dt²) source. Testing it means
+restructuring the integrator, so it is not attempted here. One tempting test is
+also **confounded**: running unconstrained does not isolate it, because without
+constraints the water O–H stretch has a ~9 fs period and BAOAB's intrinsic
+on-step kinetic bias is large at 2 fs for reasons unrelated to SHAKE.
+
+**What a user should know meanwhile:** at the shipped 2 fs default the reported
+temperature reads about 2 K below the setpoint, and at 4 fs about 6 K below —
+under 1% and 2.5%, a sampling and reporting bias rather than an instability, but
+visible to anyone comparing against a notebook run.
+
+## The constrained velocity was recovered the ill-conditioned way
+
+**`v = (positions - reference) / halfStep`, in both the host and the device.**
+That is algebraically exactly `v + correction / halfStep` — `positions - reference`
+*is* `halfStep·v + correction` — so it was never a wrong formula. It was a right
+formula that obtains a ~1e-3 nm displacement by subtracting two coordinates
+spanning the box, whose absolute f32 error is `span·eps` however small the answer
+is. Divided by the half step, one ulp near 2.82 nm becomes a **2.4e-4 nm/ps**
+velocity kick, on every constrained atom, every step, against a hydrogen's
+thermal 1.6 nm/ps.
+
+🔴 **SO A SMALLER TIMESTEP MADE IT WORSE, WHICH IS WHY IT LOOKED LIKE ANYTHING
+BUT ARITHMETIC.** The error does not shrink with the step, so dividing by a
+smaller half step amplifies it, and there are more steps per nanosecond to
+accumulate. Measured three ways before the fix: NVE drift rose **29× per
+halving** of dt with constraints on; it was **flat** with constraints off, where
+this line never executes; and the f64 host *fell* over the same range, as a
+correct integrator should.
+
+**The fix is a conditioning change with no change of algorithm.** SHAKE now
+accumulates the correction it applies, and the velocity update is
+`v += correction / halfStep`. A ~1e-5 nm number in its own float carries
+relative precision: measured per-step velocity error **5.89e-5 → 7.23e-9 nm/ps**
+on this box, and the gain grows with the box because the old error scaled with
+the span (98× at 0.5 nm, 8100× at 2.82, 120000× at 35).
+
+| dt | drift before | drift after |
+|---|---|---|
+| 1 fs | 2.2 | 2.747 |
+| 0.5 fs | **258.7** | **3.627** |
+| 0.25 fs | **1811** | **5.583** |
+
+and the end temperature holds near the setpoint at every step — 299.5 / 297.4 /
+299.1 K — where 0.25 fs previously reached **398 K**. One device step against the
+f64 host also came 20× closer, 1.15e-3 → 5.76e-5 nm/ps.
+
+🔴 **AND THE f64 CHECK CAUGHT A FACTOR-OF-TWO BUG BEFORE IT REACHED THE KERNEL.**
+The two forms must agree to roundoff in double precision, and the first version
+did not: it differed by 1.5e-2 relative after a *single* step. The cause is that
+iterating constraints touches a water oxygen twice — it is in O–H1 and O–H2 —
+which was harmless when the velocity was *overwritten* with the same value both
+times and is a doubled correction the moment the update becomes an addition. The
+host now iterates unique constrained atoms; the device already did, because one
+thread owns a cluster and the cluster's atom list has no repeats. After the fix
+the two forms agree to **1.16e-13** relative.
+
+**What this did not fix.** At 2 fs — the shipped default, where the f32 kick
+mattered least — the 20 ps NVE drift moved from +0.484 to +1.222 against a
+fluctuation of 9.3, which is inside the noise of that measurement rather than an
+improvement or a regression; the trajectory also changed, so the two numbers are
+not the same experiment. The **14b** half of the finding, the cooling at large
+dt, is untouched and still unexplained: it is not this line, because the line is
+algebraically correct and `check:timestep` now shows the constrained arm flat.
+
+## The skin detector was measuring the wrong window
+
+**It reported only the steps since the last rebuild inside the block it read.**
+`#encodeForces` cleared the displacement accumulator at every rebuild, *inside*
+the command buffer, while `#checkSkin` read it once per submitted block — and
+`web/app.js` submits blocks of `rebuildInterval` steps (the user's requested
+ceiling, 20) while the adaptive interval starts at 4. So a default block held
+five rebuilds and the host saw the last four steps of twenty.
+
+🔴 **AND THE RESOLUTION FELL EXACTLY WHEN IT MATTERED.** After a violation the
+interval halves, so the fraction of each block the host could see shrank
+further — the detector got blinder the moment it had something to report.
+
+Controlled: the same 100 steps, the same rebuild interval, only the submit
+boundary moved. The final position checksum is identical to 13 digits in all
+three, so nothing about the physics differs.
+
+| blockSize | worst usage | worst displacement | missed-pair bound |
+|---|---|---|---|
+| 4 | 47.23 | 0.09446 nm | 5.649 |
+| 20 | **20.34** | 0.04068 nm | 1.346 |
+| 100 | **16.37** | 0.03274 nm | 1.077 |
+
+So every user-facing staleness number — `skinViolations`, `worstDisplacement`,
+`worstSkinUsage`, and the `missedPairForceBound` the page prints as the
+quantitative reason a run is still trustworthy — was understated by **2.3× to
+5.2×** purely by a submit granularity that has nothing to do with the physics.
+
+**What the fix is.** The displacement kernel keeps **two** slots and takes the
+same per-step value into both. Slot 0 answers "has the list gone stale since it
+was *built*?" and is cleared at every rebuild, as before. Slot 1 is cleared once
+per **block** and so records the worst per-interval displacement anywhere in it.
+Both are one `atomicMax` on a bit pattern in a diagnostic kernel, not the force
+path.
+
+🔴 **TAKING THE SAME VALUE INTO BOTH IS WHAT MAKES SLOT 1 THE RIGHT QUANTITY**
+rather than a monotonically growing one. Each interval measures from its own
+rebuild origin, so a maximum over those is the worst *per-interval* figure — not
+the displacement since the start of the block, which would overstate.
+
+**Gated by exact equality, not a tolerance.** The device reduces the same f32
+values by `atomicMax` in every arm, and a maximum over a set is the same bits
+however it is grouped — a tolerance would hide the defect the arm exists for.
+Falsified: restoring the shipped window reproduces 47.23 / 20.34 / 16.37 while
+the trajectory checksum stays identical.
+
+**What is deliberately not compared, and why.** `skinViolations` counts *blocks*
+that contained a violation, which the page's log says out loud ("over N
+block(s)"), and `stepsWithStaleList` attributes the whole block when any
+interval in it was stale — conservative, and now independent of submission.
+With the adaptive controller **live**, block size still changes the run: a
+different observation cadence makes the controller settle at a different
+interval, so the trajectory itself differs. That is the determinism finding in
+`docs/REVIEW.md`, not this one, and it is now the only remaining block-size
+dependence. At the page's own shape, blockSize 20 and 10 agree exactly where
+they previously read 0.991 and 1.161.
+
+## The barostat was deciding on the wrong energy
+
+**`#evaluatePotential` summed every term except the positional restraint.** It is
+what `attemptVolumeChange` feeds to `metropolisWeight`, and `energy()` — which
+only *reports* — did include the restraint. So through the whole shipped NPT
+equilibration the reported potential energy was right and the accept/reject
+decision was wrong. OpenMM's `MonteCarloBarostat` takes
+`getState(State::Energy, ..., integrator.getIntegrationForceGroups())`, which
+includes the notebooks' own `CustomExternalForce`.
+
+🔴 **AND IT IS A BIAS ON THE VOLUME, NOT A SYMMETRIC PENALTY.** Centroid scaling
+sends each displacement `d₀ → d₀ + (s−1)R`, so the restraint energy picks up
+`2k(s−1)·Σd₀·R` — linear in `(s−1)`, therefore directional — as well as
+`k(s−1)²·Σ|R|²`, which resists any move. Dropping both means the barostat
+neither feels the restraint's resistance to changing the volume nor its
+preferred direction. Measured at the page's own equilibration settings the
+omitted term was **6.906 kJ/mol, about 2.8 kT**, against a whole Metropolis
+weight of −2.510.
+
+🔴 **`#encodeForces` ALREADY ENCODED THE RESTRAINT PASS**, so the trial *forces*
+carried it and only the energy sum did not. That is why the trajectory looked
+right and nothing in the output showed it.
+
+**Why no gate saw it.** `check-barostat.mjs` ran entirely unrestrained, and
+`check:openmm`'s restrained arm compares energies *at a configuration* and never
+a decision. Two correct oracles with the defect in the gap between them. The new
+arm runs the page's own settings, warms the solute off its reference so the term
+has a value at all, and compares the trial potential against the reported one.
+Falsified: with the term dropped the gap is **99.998% of the restraint energy**.
+
+**Blast radius: bounded.** Equilibration is short and production releases the
+restraint and re-equilibrates the density itself, so this corrupted the
+equilibration density rather than the production ensemble.
+
+## The neighbour capacity did not follow the density
+
+**`#checkNeighbourCapacity` was called from exactly one place — `initialise()`.**
+`run()` never asked again, and `#updateBox` carried the construction-time
+capacity forward unchanged, so a barostat compressing the box raised the density
+against a fixed capacity. `grownPlan` and `NeighbourOverflowError` both existed
+and were **unreachable from the step loop**.
+
+Measured on `ala-wat-big`, contracted the way a barostat goes: the requirement
+crossed its 1499 capacity at **97.7 atoms/nm³** — bulk TIP3P density, which is
+exactly where the shipped NPT equilibration is documented to land.
+
+🔴 **AND THE DROPPED PAIRS WERE NOT AT THE CUTOFF**, so the skin detector's
+`missedPairForceBound` did not bound them: the kernel truncates each over-full
+list at whatever the cell stencil enumerated last, which is an arbitrary
+distance. Against an f64 all-pairs host loop at identical coordinates, a
+973-of-840 overflow cost **43.56 kJ/mol** of LJ, **42.12** of Coulomb and a worst
+force component of **2803 kJ/mol/nm** — rms force error 9.8e-3 against 1.1e-6 for
+the control.
+
+🔴 **THE DIAGNOSTIC WAS A SNAPSHOT, NOT A MAXIMUM.** `required` is cleared inside
+the command buffer at every rebuild, so the host read the *last* rebuild's
+requirement — the overflow at 97.7 atoms/nm³ read "ok" at 1482 one step later
+and had vanished from the log.
+
+**What the fix is.** Prevention and detection:
+
+- `#updateBox` **re-estimates** the capacity for the new box and takes the larger
+  of that and the carried value, so the buffer grows with density and does not
+  churn when the box expands again.
+- `run()` checks the capacity at every block boundary — one `u32` at a boundary
+  that already synchronises for validation, so it costs what `#checkSkin` costs —
+  and keeps a high-water mark across the run.
+- `neighbourSlack` and `maxNeighbours` are now **forwarded** from the caller.
+  They were silently dropped, which also made a mid-run overflow impossible to
+  provoke on purpose — a large part of why the detection path was missing.
+
+**What the gate proves, exactly.** With the fix removed, capacity stays at 1499
+while the requirement climbs 1071 → 1395 over 65 → 103 atoms/nm³, and the
+high-water mark reads 0 because nothing asked. Both arms fail. The *spontaneous*
+overflow is **not** reproduced by this arm: on its 40-step relaxation schedule
+the headroom holds, where the review's 20-step schedule left the local density
+peakier. Arm 2 forces the condition directly instead, pinning the capacity to 64
+and asserting the run grows it to 918. Asking for a wider skin does not change
+it either — 0.4 nm is already what `skinFor` derives for that box.
+
+## The README claimed something the page could not honour
+
+**"No install, no queue, no upload" and "Nothing leaves your machine … There is
+no server to send a structure to"** — while `index.html:224` ships a **Share to
+LogMD** button that posts frames to a third party. The page's own caveat was
+honest about it; the README never mentioned the feature, and the README is the
+document a reader meets first. It is also the project's central claim.
+
+Corrected to say that nothing leaves the machine *unless you ask it to*, with the
+one opt-in exception named. Three further false or stale statements in the same
+document went with it: that **nothing in a step reads back to the host** (the
+barostat does, once per volume move, 25 steps by default, at a measured
+0.167 ms/step), that **the viewer reads the simulation's own position buffer**
+(it is handed host-built PDB text — the Mol\* switch made that true), and the
+0.992 g/cm³ density, now quoted as the converged **1.001 ± 0.013** against
+OpenMM's 0.9997 ± 0.014 with the compressibility that the fluctuation implies.
+
+🔴 **GATED, BECAUSE THIS IS THE RECURRING FAILURE MODE.** A test reads
+`index.html` for the share button and, if it is there, requires the README to
+name LogMD and to qualify the claim — and fails on the exact absolute phrasings
+that were wrong. It also re-checks the half of the claim that is true: no
+absolute-origin `src` or `href` anywhere, so opening the page makes no request.
+
+## The PME reciprocal lattice, which was transposed
+
+**Every non-orthorhombic box was wrong, and every validated number in this
+document was unaffected.** `fractional` builds `s_d = Σᵢ rᵢ·R[i][d]`, so the
+phase `k·s` gives a Cartesian wave vector `mᵢ = Σ_d k_d·R[i][d]` — **row** `i`
+of the inverse box. Both `cpu/forces/pme.js` and `webgpu/kernels/pme.js` read
+the **column**, which is the transpose.
+
+🔴 **AND FOR A RECTANGULAR CELL THE TRANSPOSE OF A DIAGONAL MATRIX IS ITSELF.**
+So the error was *exactly zero* on every fixture this repository had — all of
+them built by `solvateBox` — and 91 kJ/mol on the first `solvateOct` box anyone
+tried. Measured by patching only those three lines:
+
+```
+ala-wat  (rectangular)  shipped 933.776245   row-form 933.776245   diff  0.000000 kJ/mol
+oct      (octahedral)   shipped 726.027026   row-form 635.144433   diff 90.882593 kJ/mol
+```
+
+🔴 **THREE SEPARATE INSTRUMENTS WERE POINTED AT THIS AND NONE COULD SEE IT.**
+
+| instrument | why it was blind |
+|---|---|
+| OpenMM per-term energies | no triclinic fixture existed — `make_fixtures.sh` only ever called `solvateBox` |
+| the self-gradient check | **structurally incapable.** The wave vector enters only the kernel *weights*, which do not depend on position, so the analytic force stays the exact gradient of the *wrong* energy. A central difference on the octahedral cell passes at relative error `0.00e+0` — verified, not assumed |
+| the WGSL-against-host differential | both carried the same construction, so they agreed about a shared error. This is what `AGENTS.md`'s "a reference must share no code with the thing it validates" is for, in a form the `shared/ ← cpu/ ← webgpu/` layering does not catch |
+
+**What gates it now.** An **exact Ewald k-space sum** in `test/physics.test.js`,
+written from the textbook formula and sharing no code with the thing it
+validates. It runs on both a rectangular and a truncated-octahedral fixture and
+holds each to the two oracles' own floors (1e-5: the exact sum converges to
+1.6e-6 between nmax 8 and 11, and a 48³ grid sits ~2e-6 from a 64³ one). Two
+further arms make it impossible to pass with the bug reintroduced: the
+transposed convention must be grossly wrong on the sheared cell **and
+bit-identical on the rectangular one**, which is the whole explanation of why
+the defect survived.
+
+🔴 **THE ORACLE WAS WRONG FIRST, AND THE RECTANGULAR ARM IS WHY THAT WAS CAUGHT.**
+The first version of the exact sum used a prefactor of `2π/V` where
+`k = 2πm` requires `1/(2πV)` — out by exactly `4π² = 39.478`. It disagreed with
+the *known-good* rectangular fixture by that factor, which is the only reason it
+was not mistaken for a finding. An oracle that has not been checked on a case
+whose answer is already known cannot be trusted on the case under test.
+
+**`test/fixtures/ala-oct.*` is in `make_fixtures.sh`**, and 8.0 Å of padding is
+not arbitrary: for an AMBER truncated octahedron `c_z = 0.8165·L`, so a 6.0 Å pad
+gives a smallest half-width of 0.97 nm — under the 1.0 nm cutoff, which
+`buildSystem` correctly refuses. 8.0 Å gives half-widths of 1.40 / 1.32 / 1.14 nm
+and 1315 atoms.
+
+### What this did NOT fix, measured
+
+🔴 **THE DIRECT-SPACE TERMS STILL DISAGREE WITH OPENMM ON A SHEARED CELL.**
+Against OpenMM at the same alpha and the same forced grid, `ala-oct` leaves
+**LJ 0.082 kJ/mol (3.07e-5)** and **Coulomb 2.115 kJ/mol (1.36e-4)**. Both are
+**identical at 24³ and 48³**, so neither is the grid floor and neither is the
+reciprocal sum — which the exact lattice sum now puts at 2.4e-6. Hypotheses
+eliminated by measurement, so nobody repeats them:
+
+- *the LJ tail correction* — accounts for it exactly at the wrong volume
+  (−60.62 kJ/mol) but the existing references are dumped with the correction
+  **off**, and matching that convention leaves the 0.082;
+- *a non-minimal minimum image* — the `c→b→a` reduction is non-minimal for
+  14.5% of pairs on this box, but for **0 of 863,955** does it change the 1.0 nm
+  cutoff verdict. All three perpendicular widths are 2.287 nm, so half of them
+  is 1.1435 nm, comfortably above the cutoff: the box-width guard is what makes
+  the simple reduction safe, and it is working;
+- *the reduction order* — `a→b→c` disagrees with `c→b→a` about the cutoff on
+  22,606 pairs, which is three orders of magnitude too many to explain
+  0.082 kJ/mol.
+
+So the octahedral case is deliberately **not** in `check-against-openmm.mjs`:
+adding it with a tolerance wide enough to pass would be loosening a tolerance to
+make a check pass. The reciprocal sum is gated; the direct-space residual is an
+open finding in `docs/REVIEW.md` with its own evidence.
+
+## Stop used to cost the whole stage
+
+**Every write-back sat after the step loop.** `hostState`, `finalState`,
+`writer.finish()`, `trajectories.push()` and both download buttons were all
+below the `while`, with only `finally { simulation.release(); }` in between — so
+`stopSignal.throwIfStopped()` threw straight past the lot. Found by a review
+pass, not by a gate; the existing pause gate only ever checked that the step
+counter was held.
+
+Measured on the page: Stop at step 2,500 of an equilibration with **5 frames
+already written**.
+
+| | before | after |
+|---|---|---|
+| trajectory | `[]`, 0 bytes | `equil:3`, 43 KiB |
+| Download DCD | disabled | enabled |
+| Download restart | disabled | enabled |
+| carried state | step 0, the post-minimise checksum | step 1040, with velocities |
+| the log said | `  stopped` | what was kept, and that a further run continues from there |
+
+🔴 **AND THE SAME `catch` SWALLOWED EVERY OTHER FAILURE.** A `DeferredValidation`
+failure, a `NeighbourOverflowError`, a lost device and a non-finite state all
+left by the same door, so **any** error at hour six cost the whole stage. A
+single-stride production — the default — lost all of it; a multi-stride one kept
+only the strides that had finished.
+
+**What the fix is.** The commit moved into `finally`, which runs on the way out
+whether the loop returned, threw, or was stopped. Three things that had to be
+got right, each of which is now a separate assertion:
+
+- 🔴 **WHAT IS SAFE TO KEEP DEPENDS ON THE STATE, NOT ON WHY THE LOOP ENDED.**
+  Classifying the error would mean enumerating every way a run can stop and
+  getting one wrong silently. The commit reads the state and asks whether it is
+  a number: a clean stop hands its state on, a blown-up one must not, and a lost
+  device cannot be read at all. The trajectory is kept in all three cases,
+  because it is held in the page rather than on the GPU.
+- 🔴 **A FAILURE TO SAVE MUST NOT REPLACE THE FAILURE THAT CAUSED IT.** An
+  uncaught throw inside `finally` discards the in-flight exception, so a
+  blow-up would be reported as whatever went wrong while saving it.
+- 🔴 **THE RESTART NOW NAMES ITS STAGE.** Every stage wrote `<name>.rst7` and the
+  button stayed enabled across stages, so stopping a production and pressing it
+  handed over the **equilibration's** state under a filename that said nothing.
+  That is the stage-handoff defect over again, reached through Stop. Files are
+  now `<name>_equil.rst7` / `<name>_prod_1.rst7`, and the log says which stage
+  and whether it was stopped early.
+
+🔴 **ONE DEFECT IN THE FIX, FOUND BY ITS OWN GATE.** The first version returned
+early when `done === 0`, on the reasoning that no steps meant nothing to save.
+It is wrong: the opening frame is appended *before* the loop, so a stage that
+goes non-finite inside its first block has one valid frame — the structure it
+started from — and the early return discarded it and also skipped the message
+explaining why nothing was carried forward. The blow-up arm caught it, reporting
+`no step completed, so this stage produced nothing to save` where the stop arm
+was green.
+
+**Also corrected, because they were in the same code.** The skin line is no
+longer printed for a stage whose state is not a number — the displacement
+detector throws before it records a maximum, so a dead run was reporting
+`worst displacement 0 pm — 0% of the budget used`, and the lane now fails if
+that string appears at all. And the DCD download no longer logs
+`wrote <name>.dcd` after writing `<name>_equil.dcd` and `<name>_prod_1.dcd`; the
+one filename a reader could copy was the one that did not exist.
+
+**What is still open from this.** A stopped stage is deliberately **not** marked
+complete, so production stays locked until equilibration finishes — but the
+state is carried, so pressing Equilibrate again continues from where it stopped
+rather than restarting. Nothing is written to disk mid-run, so closing the tab
+still loses everything held in the page; that is a separate entry in
+`docs/REVIEW.md`.
+
+## The blown-up run that completed
+
+**Nothing in this port asked whether the state was still a number.** A grep over
+`webgpu/`, `shared/`, `cpu/` and `web/` found no finiteness or magnitude test on
+positions, forces, energy or temperature in any run path; the only
+`Number.isFinite` calls were cosmetic formatters. Found by a review pass, not by
+a gate — see `docs/REVIEW.md`.
+
+🔴 **SO A DEAD RUN LOOKED LIKE A FINISHED ONE.** Measured on the page at a 40 fs
+timestep, which `index.html` accepted without comment because the field had no
+maximum: every atom non-finite after 50 steps, and then the run *completed* —
+300 steps encoded at full speed, 13 frames written, both download buttons
+enabled, the next stage unlocked, and a log line reading
+`300 steps in 7.7 s — 25.79 ms/step`. The tiles read `–` and the CSV read `NaN`.
+
+🔴 **AND NO TOOL DOWNSTREAM WOULD HAVE SAID SO EITHER.** The all-NaN DCD was read
+by **cpptraj** with no warning at all (`Read 10 frames and processed 10 frames`)
+and by **MDAnalysis** without one, so a user who took the file away had nothing
+to tell them. The restart writer was worse than silent: its twelve-column guard
+catches an atom that has flown away, but `Number.NaN.toFixed(7)` is the
+three-character string `"NaN"`, which passes comfortably — so the writer emitted
+a restart that **this port's own reader then refused**
+(`non-numeric coordinate field "NaN" on line 3`).
+
+**The information was already on the host, every block.** `#checkSkin` reads the
+reduced squared displacement at every block boundary, and a non-finite position
+makes that reduction non-finite — so the signal arrived every block and was
+discarded. Worse than discarded: `Math.sqrt(Math.max(NaN, 0))` is `NaN`, which
+left `worstDisplacement` at 0 while failing `usage <= 1`, so the one loud thing a
+dead run printed was
+
+```
+skin: 243 pm, worst displacement 0 pm — 0% of the budget used
+⚠ the neighbour list was stale for 300 of 300 steps … this costs
+  exactness rather than stability — but the run is not exact.
+```
+
+two consecutive lines that contradict each other, ending in a reassurance that
+is exactly backwards. The rebuild interval was also driven to 1, so a dead run
+got 20× slower and read as a performance problem.
+
+**What the fix is.** Three layers, in `shared/finite.js` and its two callers:
+
+| where | cost | catches |
+|---|---|---|
+| `#checkSkin`, every block | **nothing** — the `u32` was already being read | positions, within one block |
+| `energy()`, every report | one comparison | velocities a step before positions follow, and an input that is infinite on the first evaluation |
+| `DcdWriter.appendFrame`, `writeRestart` | one scan per frame | the last line of defence: no file this program writes can contain `NaN` |
+
+The free detector is sound rather than lucky because the displacement kernel
+reduces `bitcast<u32>` of a squared displacement, and `NaN` (`0x7FC00000`) and
+`+Inf` (`0x7F800000`) both sit above any finite squared displacement a
+simulation can reach — a 1 nm displacement is `0x3F800000` — so a poisoned value
+always wins the `atomicMax`.
+
+🔴 **THE REFUSAL IS DELIBERATELY NOT IN `#evaluatePotential`.** The minimiser's
+line search calls it on trial points, and a line search must be allowed to
+evaluate a bad step and reject it; throwing there would turn a working back-off
+into a failed minimisation. That path is already safe for a reason worth stating:
+the accept test is `trial < potential`, and every comparison against `NaN` is
+false, so a non-finite trial is always rejected.
+
+**Falsified both ways.** With the detectors removed, `npm run test:gpu:blowup`
+reports the original symptom exactly — `threw: false`, `stoppedAtStep: 200`, the
+blown-up run running to completion — while the 2 fs arm still passes, so the
+gate cannot pass by refusing everything. The two writer arms in `npm test` fail
+with the guards removed and the restart round-trip then throws from the *reader*
+instead of the writer, which is the original defect.
+
+**What is still open from this.** The timestep field still has no maximum
+(`index.html:73`, `min="0.5"`, where the notebooks' dropdown is 0.5–4 fs), so
+the easiest route into this state is still one keystroke — now refused rather
+than silent, but better prevented. And a refusal mid-run still costs the stage,
+because every write-back in `web/app.js` sits after the loop; that is a separate
+defect with its own entry in `docs/REVIEW.md`.
 
 ## What the viewer costs now
 

@@ -129,7 +129,10 @@ function driftWithConstraints(system, positions, velocities, reference, step, op
     positions[index] += step * velocities[index];
   }
   if (system.constraints.count === 0) return;
-  const result = applyPositionConstraints(system, positions, reference, options);
+  const corrections = options.correctionScratch ?? null;
+  if (corrections !== null) corrections.fill(0);
+  const result = applyPositionConstraints(system, positions, reference,
+    corrections === null ? options : { ...options, corrections });
   if (!result.converged) {
     const error = new Error(result.message ?? "constraints did not converge");
     error.name = "ConstraintFailure";
@@ -142,11 +145,37 @@ function driftWithConstraints(system, positions, velocities, reference, step, op
   // would make the two disagree by that rounding on every free atom.
   const inverseStep = 1 / step;
   const { atomA, atomB, count } = system.constraints;
-  for (let index = 0; index < count; index += 1) {
-    for (const atom of [atomA[index], atomB[index]]) {
-      velocities[atom * 3] = (positions[atom * 3] - reference[atom * 3]) * inverseStep;
-      velocities[atom * 3 + 1] = (positions[atom * 3 + 1] - reference[atom * 3 + 1]) * inverseStep;
-      velocities[atom * 3 + 2] = (positions[atom * 3 + 2] - reference[atom * 3 + 2]) * inverseStep;
+  // 🔴 UNIQUE ATOMS, AND THE OLD FORM DID NOT NEED THEM. Iterating constraints
+  // touches a water oxygen twice - it is in O-H1 and O-H2 - which was harmless
+  // when the velocity was OVERWRITTEN with the same value both times, and is a
+  // factor-of-two error the moment the update becomes `+=`. Caught by checking
+  // the two forms against each other in f64, where they must agree to roundoff:
+  // before this they differed by 1.5e-2 relative after a single step.
+  const touched = system.constraints.uniqueAtoms ?? (() => {
+    const seen = new Set();
+    for (let index = 0; index < count; index += 1) {
+      seen.add(atomA[index]);
+      seen.add(atomB[index]);
+    }
+    const list = Int32Array.from([...seen].sort((x, y) => x - y));
+    system.constraints.uniqueAtoms = list;
+    return list;
+  })();
+  for (const atom of touched) {
+    {
+      if (corrections !== null) {
+        // 🔴 v += correction / h, NOT (x - x_ref) / h. The two are the same
+        // expression - `x - x_ref` IS `h*v + correction` - and differ only in
+        // conditioning: see the note in applyPositionConstraints. This form
+        // never subtracts two box-spanning coordinates.
+        velocities[atom * 3] += corrections[atom * 3] * inverseStep;
+        velocities[atom * 3 + 1] += corrections[atom * 3 + 1] * inverseStep;
+        velocities[atom * 3 + 2] += corrections[atom * 3 + 2] * inverseStep;
+      } else {
+        velocities[atom * 3] = (positions[atom * 3] - reference[atom * 3]) * inverseStep;
+        velocities[atom * 3 + 1] = (positions[atom * 3 + 1] - reference[atom * 3 + 1]) * inverseStep;
+        velocities[atom * 3 + 2] = (positions[atom * 3 + 2] - reference[atom * 3 + 2]) * inverseStep;
+      }
     }
   }
 }

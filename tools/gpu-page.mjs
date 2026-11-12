@@ -845,6 +845,206 @@ try {
    * trajectory of the wrong starting point. The only way to see it is to record
    * the structure and the box at each stage boundary and compare them.
    */
+  if (process.argv.includes("--stop-probe")) {
+    // 🔴 STOP USED TO COST THE WHOLE STAGE, AND NOTHING WATCHED FOR IT. Every
+    // write-back sat after the step loop, so `throwIfStopped()` threw past all
+    // of it: measured, Stop at step 2,500 with 5 frames already written left
+    // `trajectoryFiles []`, `trajectoryBytes 0`, both downloads disabled and
+    // `hostState` still at the post-minimise checksum. This lane stops a long
+    // equilibration in flight and asserts the output survived.
+    const expression = `(async () => {
+        const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+        const idle = async (id, tries) => {
+          for (let i = 0; i < tries; i += 1) {
+            await wait(250);
+            if (!document.getElementById(id).disabled) return true;
+          }
+          return false;
+        };
+        const [top, crd] = await Promise.all([
+          fetch("test/fixtures/ala-wat.prmtop").then((r) => r.text()),
+          fetch("test/fixtures/ala-wat.inpcrd").then((r) => r.text()),
+        ]);
+        const files = new DataTransfer();
+        files.items.add(new File([top], "ala-wat.prmtop"));
+        files.items.add(new File([crd], "ala-wat.inpcrd"));
+        const input = document.getElementById("file-input");
+        input.files = files.files;
+        input.dispatchEvent(new Event("change"));
+        await wait(1500);
+        const snap = () => {
+          const state = window.rainmd.hostState;
+          if (state === null || state === undefined) return null;
+          const p = state.positions;
+          let checksum = 0;
+          for (let i = 0; i < p.length; i += 1) checksum += p[i] * (i % 97 + 1);
+          return {
+            checksum: Number(checksum.toFixed(5)),
+            step: state.step ?? null,
+            hasVelocities: state.velocities !== null && state.velocities !== undefined,
+          };
+        };
+        document.getElementById("engine").value = "gpu";
+        document.getElementById("pressure").value = "1";
+        document.getElementById("min-steps").value = "500";
+        // 🔴 LONG ENOUGH THAT IT CANNOT FINISH, and a 1 ps write interval so
+        // frames exist within a second or two of starting. A stage that
+        // completed on its own would make this lane pass without testing Stop.
+        document.getElementById("eq-time").value = "2";
+        document.getElementById("eq-write").value = "1";
+        document.getElementById("eq-restraint").value = "500";
+
+        document.getElementById("minimise").click();
+        await idle("minimise", 240);
+        const afterMin = snap();
+
+        document.getElementById("equilibrate").click();
+        // Wait for real progress: three reported rows means frames have been
+        // written and the run is genuinely in flight.
+        let rows = 0;
+        for (let i = 0; i < 240; i += 1) {
+          await wait(250);
+          const r = window.rainmd.plotRows();
+          rows = r === null ? 0 : r.length;
+          if (rows >= 3) break;
+        }
+        const runningAtStop = document.getElementById("stop").disabled === false;
+        document.getElementById("stop").click();
+        const stopped = await idle("equilibrate", 240);
+        await wait(500);
+        const afterStop = snap();
+        const stopArm = {
+          trajectoryFiles: window.rainmd.trajectoryFiles,
+          trajectoryBytes: window.rainmd.trajectoryBytes,
+          restartStage: window.rainmd.restartStage,
+          restartInterrupted: window.rainmd.restartInterrupted,
+          dcdDisabled: document.getElementById("download-dcd").disabled,
+          stateDisabled: document.getElementById("download-state").disabled,
+        };
+
+        // 🔴 ARM 2: THE OPPOSITE ASSERTION, SO THE FIX CANNOT BE "KEEP
+        // EVERYTHING". A blown-up stage must keep the frames it wrote and must
+        // NOT hand on its state - otherwise the next stage starts from NaN and
+        // the restart button offers a file the writer refuses. 40 fs is the
+        // timestep the field accepted and that goes non-finite in 50 steps.
+        document.getElementById("timestep").value = "40";
+        document.getElementById("eq-time").value = "0.1";
+        document.getElementById("equilibrate").click();
+        await idle("equilibrate", 480);
+        await wait(500);
+        const afterBlowUp = snap();
+        return JSON.stringify({
+          afterMin,
+          afterStop,
+          rowsBeforeStop: rows,
+          runningAtStop,
+          stopped,
+          ...stopArm,
+          afterBlowUp,
+          blowUp: {
+            trajectoryFiles: window.rainmd.trajectoryFiles,
+            restartStage: window.rainmd.restartStage,
+            restartInterrupted: window.rainmd.restartInterrupted,
+          },
+          log: document.getElementById("log").textContent.slice(-2600),
+        });
+      })()`;
+    const evaluation = await cdp(socketUrl, "Runtime.evaluate", {
+      expression, awaitPromise: true, returnByValue: true,
+    });
+    const payload = JSON.parse(cdpValue(evaluation, "--stop-probe"));
+    console.log("\nstopping a stage in flight - what survived:");
+    console.log(`  rows before stop      ${payload.rowsBeforeStop}`);
+    console.log(`  run was in flight     ${payload.runningAtStop}`);
+    console.log(`  trajectory files      ${JSON.stringify(payload.trajectoryFiles)}`);
+    console.log(`  trajectory bytes      ${payload.trajectoryBytes}`);
+    console.log(`  download DCD enabled  ${!payload.dcdDisabled}`);
+    console.log(`  download rst7 enabled ${!payload.stateDisabled}`);
+    console.log(`  restart stage         ${payload.restartStage} `
+      + `(interrupted ${payload.restartInterrupted})`);
+    console.log(`  hostState step        ${payload.afterStop?.step} `
+      + `(after minimise ${payload.afterMin?.step})`);
+    let bad = 0;
+    const fail = (why) => { console.log(`  FAILED: ${why}`); bad += 1; };
+    if (payload.runningAtStop !== true) {
+      fail("the run was not in flight when Stop was pressed, so this lane "
+        + "proved nothing - it needs a stage long enough not to finish");
+    }
+    if (payload.rowsBeforeStop < 3) fail("the run never reported a frame before Stop");
+    if (!Array.isArray(payload.trajectoryFiles) || payload.trajectoryFiles.length === 0) {
+      fail("the trajectory was discarded - frames were written and no file was kept");
+    }
+    if (!(payload.trajectoryBytes > 0)) fail("the trajectory holds no bytes");
+    if (payload.dcdDisabled !== false) fail("Download DCD is disabled after a stop");
+    if (payload.stateDisabled !== false) fail("Download restart is disabled after a stop");
+    // 🔴 THE STATE MUST HAVE BEEN CARRIED, NOT LEFT AT THE PREVIOUS STAGE'S.
+    // The original symptom was a post-stop `hostState` whose checksum was
+    // identical to the post-minimise one.
+    if (payload.afterStop === null || payload.afterMin === null) {
+      fail("no host state at one of the two boundaries");
+    } else {
+      if (payload.afterStop.checksum === payload.afterMin.checksum) {
+        fail("the stopped stage handed on the structure it was GIVEN - the "
+          + "state was not carried (this is the original symptom)");
+      }
+      if (payload.afterStop.hasVelocities !== true) {
+        fail("the stopped stage handed on no velocities");
+      }
+      if (!(payload.afterStop.step > 0)) fail("the carried state is at step 0");
+    }
+    // And the restart must name the stage it came from, so a stale one from an
+    // earlier stage cannot be downloaded under a filename that hides it.
+    if (payload.restartStage !== "equil") {
+      fail(`the offered restart says stage ${JSON.stringify(payload.restartStage)}, `
+        + "expected \"equil\" - a restart that does not name its stage is how a "
+        + "stopped production handed over the equilibration's structure");
+    }
+    if (payload.restartInterrupted !== true) {
+      fail("the restart does not record that its stage was stopped early");
+    }
+    console.log("\na blown-up stage after it - what must NOT survive:");
+    console.log(`  trajectory files      ${JSON.stringify(payload.blowUp.trajectoryFiles)}`);
+    console.log(`  restart stage         ${payload.blowUp.restartStage} `
+      + `(interrupted ${payload.blowUp.restartInterrupted})`);
+    console.log(`  hostState checksum    ${payload.afterBlowUp?.checksum} `
+      + `(was ${payload.afterStop?.checksum} after the stop)`);
+    // 🔴 THE FRAMES IT WROTE ARE KEPT: they are real data from before the
+    // blow-up, and the writer refused the non-finite ones itself.
+    if (!Array.isArray(payload.blowUp.trajectoryFiles)
+      || payload.blowUp.trajectoryFiles.length <= payload.trajectoryFiles.length) {
+      fail("the blown-up stage kept no trajectory at all - the frames written "
+        + "before it went non-finite are real data");
+    }
+    // 🔴 BUT ITS STATE IS NOT HANDED ON, OR THE NEXT STAGE STARTS FROM NaN.
+    if (payload.afterBlowUp === null || payload.afterStop === null) {
+      fail("no host state across the blow-up");
+    } else if (payload.afterBlowUp.checksum !== payload.afterStop.checksum) {
+      fail("the blown-up stage overwrote the carried state - the next stage "
+        + "would start from a structure that is not a number");
+    }
+    // And it must not replace the good restart with its own.
+    if (payload.blowUp.restartStage !== payload.restartStage) {
+      fail(`the blown-up stage replaced the offered restart `
+        + `(${payload.restartStage} -> ${payload.blowUp.restartStage})`);
+    }
+    // 🔴 AND THE VOID DIAGNOSTIC MUST NOT BE PRINTED AS IF IT MEANT SOMETHING.
+    // The displacement detector throws before updating its own maxima, so a
+    // blown-up stage reports zero - which used to render as "0% of the budget
+    // used" directly after a run that had died.
+    if (/0% of the budget used/.test(payload.log)) {
+      fail("a stage reported \"0% of the budget used\" - the skin accounting "
+        + "was printed for a run whose detector stopped it first");
+    }
+    if (!/not a number/.test(payload.log)) {
+      fail("the log does not say the state was not a number, so a reader has "
+        + "no way to know why nothing was carried forward");
+    }
+    if (bad > 0) { console.log(`\n${payload.log}`); process.exitCode = 1; } else {
+      console.log("\n  Stop keeps its output; a blow-up keeps its frames and "
+        + "hands on nothing");
+    }
+  }
+
   if (process.argv.includes("--handoff")) {
     const expression = `(async () => {
         const wait = (ms) => new Promise((r) => setTimeout(r, ms));

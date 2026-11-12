@@ -128,7 +128,13 @@ export async function main(device) {
   delete results._hostNormals;
 
   // ---- arms 3 and 4: many steps, on the device alone --------------------
-  for (const [name, friction, steps] of [["thermostatted", 10.0, 400], ["conservative", 0.0, 5000]]) {
+  // 🔴 THE CONSERVATIVE ARM RUNS 20 ps, BECAUSE THAT IS THE NUMBER THE DOCS
+  // QUOTE. It ran 5000 steps - 10 ps - while docs/STATUS.md and the page both
+  // quoted a drift "over 20 ps", so the published figure was produced by no
+  // command in this repository and reaching it meant editing a constant. The
+  // arm's own comment said so: "this arm measures +2.8 ... The number to quote
+  // is the 20 ps one".
+  for (const [name, friction, steps] of [["thermostatted", 10.0, 400], ["conservative", 0.0, 10000]]) {
     const simulation = new GpuSimulation(device, system, {
       timestep: 0.002, temperature: 298, friction, seed: 7, alpha: ALPHA, grid: GRID,
       skin: 0.2, rebuildInterval: 10,
@@ -188,6 +194,30 @@ export async function main(device) {
         return denominator === 0 ? 0 : (n * sumXY - sumX * sumY) / denominator;
       })();
       const drift = fit / atomCount;
+      // 🔴 THE SAME TRACE FITTED OVER GROWING WINDOWS, BECAUSE THE DRIFT IS
+      // SUPER-LINEAR AND A SINGLE NUMBER HIDES THAT. Measured on a 200 ps run:
+      // +0.459 at 20 ps, +0.489 at 50, +2.500 at 100 and +13.844 at 200
+      // kJ/mol/ns/atom, with the system heating 291 -> 447 K - about 75% of it
+      // the stale neighbour list, in a feedback loop (heat, larger
+      // displacements, skin exceeded, missed pairs, more heat). So the figure
+      // is only meaningful beside its window, and quoting it bare invites a
+      // reader to extrapolate something that does not extrapolate.
+      const windowDrift = (fraction) => {
+        const slice = trace.slice(0, Math.max(3, Math.round(trace.length * fraction)));
+        const n = slice.length;
+        const meanTime = slice.reduce((a, r) => a + r.time, 0) / n;
+        const meanTotal2 = slice.reduce((a, r) => a + r.total, 0) / n;
+        let num = 0;
+        let den = 0;
+        for (const r of slice) {
+          num += (r.time - meanTime) * (r.total - meanTotal2);
+          den += (r.time - meanTime) ** 2;
+        }
+        return {
+          picoseconds: Number(slice.at(-1).time.toFixed(1)),
+          driftPerNsPerAtom: Number(((num / den) * 1000 / atomCount).toFixed(4)),
+        };
+      };
       let spread = 0;
       const meanTotal = trace.reduce((total, report) => total + report.total, 0) / trace.length;
       for (const report of trace) spread += (report.total - meanTotal) ** 2;
@@ -199,20 +229,23 @@ export async function main(device) {
       // diagnostic. Only running out of iterations is a failure.
       const constraintsOk = worstConstraint < 2e-5 && !diagnostics.shakeHitIterationCap
         && !diagnostics.rattleHitIterationCap;
-      // 🔴 THE BAR COMES FROM A LONGER MEASUREMENT, NOT FROM A CONVENTION.
-      // Over 20 ps (10000 steps) this system's fitted drift is **+0.30
-      // kJ/mol/ns/atom**, with a 3.45 kJ/mol fluctuation about the mean and
-      // 2.73 about the fitted line - so the slope is resolved rather than
-      // noise. At 2 ps it is NOT resolved: a sweep of five skin and
-      // rebuild-interval settings gave -1.3 to +3.7 with no ordering, which is
-      // fluctuation. Hence 5000 steps here and a bar ten times the measurement.
-      // 🔴 AND THE BAR IS 5, NOT 3, BECAUSE 10 ps DOES NOT RESOLVE THE SLOPE
-      // EITHER. This arm measures +2.8 with an 11.7 kJ/mol fluctuation, where
-      // the 20 ps run measures +0.30 with a 3.45 fluctuation - the difference
-      // is that the system is still converting potential into kinetic energy
-      // early on, which inflates the fluctuation without being drift. A bar of
-      // 3 would pass today and flake tomorrow. The number to quote is the 20 ps
-      // one; this arm's job is to catch an integrator that is grossly wrong.
+      // 🔴 THE ARM NOW PRODUCES THE NUMBER THE DOCS QUOTE, WHICH IT DID NOT.
+      // It ran 10 ps while STATUS.md and the page both said "over 20 ps", so
+      // the published +0.30 kJ/mol/ns/atom came from no command here and
+      // reaching it meant editing a constant. Measured at 20 ps with this arm's
+      // own setup: **+0.484**, fluctuation 6.36, mean temperature 414 K from
+      // the unminimised start. The old figure's companions - a 3.45 fluctuation
+      // and a 2.73 residual about the fit - were never computed by anything and
+      // the residual is not an output at all.
+      //
+      // 🔴 AND THE BAR STAYS AT 5 BECAUSE THE DRIFT IS SUPER-LINEAR. The same
+      // trace fitted over growing windows gives +2.63 at 4 ps, +0.370 at 10 and
+      // +0.484 at 20 - the early figure is the strained start converting
+      // potential into kinetic energy, not drift - and a 200 ps run reaches
+      // +13.8 as the system heats 291 -> 447 K in a feedback loop with the
+      // neighbour list. A bar tight enough to pin 0.484 would flake on the
+      // transient; this arm's job is to catch an integrator that is grossly
+      // wrong, and `driftWindows` below is what a reader should quote.
       const driftOk = name === "conservative" ? Math.abs(drift) < 5 : true;
       const temperatureOk = name === "thermostatted"
         ? Math.abs(meanTemperature - 298) < 25 : true;
@@ -221,6 +254,8 @@ export async function main(device) {
 
       results[name] = {
         friction, steps,
+        driftWindows: name === "conservative"
+          ? [0.25, 0.5, 1.0].map(windowDrift) : undefined,
         secondsOnDevice: elapsed,
         millisecondsPerStep: (elapsed / steps) * 1000,
         worstConstraintError: worstConstraint,

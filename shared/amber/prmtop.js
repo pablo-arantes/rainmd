@@ -19,6 +19,7 @@ import {
   NM_PER_ANGSTROM, ljCoefficientsToInternal,
 } from "../units.js";
 import { readAmberSections } from "./sections.js";
+import { auditFlags } from "./flags.js";
 
 /** POINTERS, by name, in the order AMBER writes them. */
 const POINTER_NAMES = [
@@ -130,6 +131,79 @@ export function parsePrmtop(text) {
     throw new Error(
       "this topology carries perturbation (IFPERT != 0) parameters, which this "
       + "engine does not read. Re-save it without the perturbed state.",
+    );
+  }
+
+  // 🔴 EVERY FLAG IN THE FILE IS AUDITED, BECAUSE UNTIL NOW NONE WERE. The
+  // parser read the twenty-six flags it names and dropped the rest in silence -
+  // so an ff19SB topology, which is the Making-it-rain notebook's OWN DEFAULT,
+  // loaded with `warnings: []` and ran without its CMAP term. See
+  // shared/amber/flags.js for the measurement and for why an unrecognised flag
+  // is refused rather than warned about.
+  const audit = auditFlags(sections.keys());
+  if (audit.refusals.length > 0) {
+    throw new Error(audit.refusals.join(" ALSO: "));
+  }
+  if (audit.unrecognised.length > 0) {
+    throw new Error(
+      `this topology carries ${audit.unrecognised.length} %FLAG section(s) this `
+      + `engine does not know: ${audit.unrecognised.join(", ")}. It is refused `
+      + "rather than ignored because a flag that changes the energy and is "
+      + "dropped produces a wrong answer that nothing downstream will reveal - "
+      + "which is exactly what happened with ff19SB's CMAP. If these carry no "
+      + "parameters, add them to IGNORED_FLAGS in shared/amber/flags.js; if "
+      + "they do, they need implementing or a refusal of their own.",
+    );
+  }
+
+  // 🔴 AND THREE OF THE REFUSALS ARE POINTERS, NOT FLAGS, SO THE AUDIT ABOVE
+  // CANNOT SEE THEM. NUMEXTRA is the one that matters: `leaprc.water.opc` and
+  // `leaprc.water.tip4pew` - OPC is ff19SB's recommended water and BOTH
+  // notebooks offer it as `Water_type` - put one zero-mass EP site per water,
+  // bonded to the oxygen. With no virtual-site machinery this engine lets
+  // `rigidWater` constrain the O-EP bond, so 933 of 3754 distance constraints
+  // tie a movable oxygen to a frozen massless point. Measured on the host, 60
+  // steps at 2 fs with a 298 K setpoint: 2653.6 K at step 15, while the extra
+  // points moved 0.00000 nm and the oxygens 0.03187. The 3-point control on the
+  // same code path reaches 412.9 K.
+  if (pointers.NUMEXTRA > 0) {
+    throw new Error(
+      `this topology has ${pointers.NUMEXTRA} extra points (NUMEXTRA), so it is `
+      + "a 4-point or 5-point water model such as OPC or TIP4P-Ew, or carries "
+      + "lone pairs. This engine has no virtual-site support: it would treat "
+      + "each massless site as an atom and constrain it to its oxygen, which "
+      + "heats the system to thousands of kelvin within a few hundred steps. "
+      + "Rebuild with a 3-point water - `source leaprc.water.tip3p`, which both "
+      + "notebooks offer - or run it in OpenMM.",
+    );
+  }
+  // IPOL lives in its own section in modern files and in no POINTERS slot, so
+  // both places are read and whichever exists decides.
+  const ipolSection = sections.get("IPOL");
+  const ipol = ipolSection !== undefined && ipolSection.values.length > 0
+    ? Number(ipolSection.values[0]) : (pointers.IPOL ?? 0);
+  if (ipol !== 0) {
+    throw new Error(
+      `this topology declares IPOL = ${ipol}, so it was built for a `
+      + "polarizable force field. This engine is fixed-charge and would run it "
+      + "with the permanent charges alone - a different force field. Rebuild it "
+      + "as fixed-charge.",
+    );
+  }
+  if (pointers.IFCAP !== 0 && pointers.IFCAP !== undefined) {
+    throw new Error(
+      `this topology declares IFCAP = ${pointers.IFCAP}, a solvent cap, which `
+      + "this engine does not implement - it would simulate the capped waters "
+      + "as though they were a periodic box. Re-solvate with `solvateBox` or "
+      + "`solvateOct`.",
+    );
+  }
+  if (pointers.NCOPY > 1) {
+    throw new Error(
+      `this topology declares NCOPY = ${pointers.NCOPY}, so it uses Locally `
+      + "Enhanced Sampling. LES replicates part of the system and scales its "
+      + "interactions; this engine would simulate the copies as real, "
+      + "interacting molecules. Rebuild without LES.",
     );
   }
 

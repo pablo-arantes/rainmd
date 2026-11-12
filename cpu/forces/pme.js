@@ -169,11 +169,25 @@ export function reciprocalEnergy(system, positions, forces, parameters) {
           charge[2 * index + 1] = 0;
           continue;
         }
-        // m = kx*a* + ky*b* + kz*c*, where the reciprocal vectors are the
-        // COLUMNS of Bo^-1 (recip rows are indexed by cartesian component).
-        const mxCart = kx * recip[0] + ky * recip[3] + kz * recip[6];
-        const myCart = kx * recip[1] + ky * recip[4] + kz * recip[7];
-        const mzCart = kx * recip[2] + ky * recip[5] + kz * recip[8];
+        // 🔴 THE ROWS OF Bo^-1, NOT ITS COLUMNS, AND THIS WAS WRONG FOR EVERY
+        // NON-ORTHORHOMBIC BOX. `fractional` above builds
+        // `s_d = sum_i r_i * recip[3i + d]`, so the phase `k . s` gathers
+        // `m_i = sum_d k_d * recip[3i + d]` - row i. Reading the column instead
+        // computes the TRANSPOSE, and for a rectangular cell Bo^-1 is diagonal
+        // so the two are identical: the error was exactly zero on every fixture
+        // this repository had, and 91 kJ/mol on the first `solvateOct` box
+        // anyone tried.
+        //
+        // 🔴 AND NO GRADIENT CHECK CAN EVER CATCH IT. The wave vector enters
+        // only the kernel WEIGHTS, which do not depend on position, so the
+        // analytic force stays the exact gradient of the wrong energy - a
+        // central difference on an octahedral cell passes at 0.00e+0. It takes
+        // an independent energy oracle on a sheared box, which is what
+        // `ala-oct` is for. The force gather below always used the rows and so
+        // was right; the two disagreed with each other on any skewed cell.
+        const mxCart = kx * recip[0] + ky * recip[1] + kz * recip[2];
+        const myCart = kx * recip[3] + ky * recip[4] + kz * recip[5];
+        const mzCart = kx * recip[6] + ky * recip[7] + kz * recip[8];
         const mSquared = mxCart * mxCart + myCart * myCart + mzCart * mzCart;
         const modulus = parameters.moduli[0][mx]
           * parameters.moduli[1][my] * parameters.moduli[2][mz];

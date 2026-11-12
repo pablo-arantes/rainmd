@@ -302,6 +302,18 @@ def main(argv=None):
             return
         if force is None:
             return
+        # 🔴 OPENMM TREATS alpha == 0 AS "CHOOSE EVERYTHING AUTOMATICALLY", SO A
+        # GRID WITHOUT AN ALPHA IS SILENTLY IGNORED. Asking for --pme-grid
+        # 24,24,24 alone produced a dump whose header still read
+        # grid=[23, 22, 19] - the auto choice - and nothing said so. Refuse it
+        # rather than hand back a reference computed on a different grid from
+        # the one the caller asked for.
+        if args.pme_grid is not None and args.pme_alpha is None:
+            raise SystemExit(
+                "--pme-grid needs --pme-alpha as well: OpenMM reads alpha == 0 "
+                "as 'choose alpha AND the grid automatically', so the grid you "
+                "asked for would be silently discarded. Pass the alpha the "
+                "automatic choice gives (it is printed in the dump header).")
         alpha = args.pme_alpha if args.pme_alpha is not None else 0.0
         if args.pme_grid is None:
             grid = (0, 0, 0)

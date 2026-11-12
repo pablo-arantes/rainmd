@@ -237,13 +237,24 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     return;
   }
 
-  // m = kx a* + ky b* + kz c*, the reciprocal vectors being the COLUMNS of the
-  // inverse box - the same extraction as 'fractional'.
+  // 🔴 THE ROWS OF THE INVERSE BOX, NOT ITS COLUMNS. See the long note in
+  // cpu/forces/pme.js: the fractional helper in wgsl-common.js builds s_d from
+  // recip[3i + d], so the Cartesian wave vector is row i, and taking the column
+  // computes the transpose. Identical for a diagonal (rectangular) inverse box,
+  // 91 kJ/mol wrong for a truncated octahedron. This kernel and its host
+  // reference carried the same error, so the differential test between them
+  // agreed about it; the independent oracle is the exact lattice sum in
+  // test/physics.test.js.
+  //
+  // 🔴 AND NO BACKTICK MAY APPEAR IN THIS COMMENT. It lives inside a JS
+  // template literal, so one backtick ends the WGSL string and the file becomes
+  // a syntax error - which is how the first draft of this comment broke every
+  // GPU lane at once. docs/STATUS.md records this happening five times.
   let frequency = vec3<f32>(f32(kx), f32(ky), f32(kz));
   let m = vec3<f32>(
-    dot(frequency, vec3<f32>(params.recipA.x, params.recipB.x, params.recipC.x)),
-    dot(frequency, vec3<f32>(params.recipA.y, params.recipB.y, params.recipC.y)),
-    dot(frequency, vec3<f32>(params.recipA.z, params.recipB.z, params.recipC.z)));
+    dot(frequency, params.recipA.xyz),
+    dot(frequency, params.recipB.xyz),
+    dot(frequency, params.recipC.xyz));
   let mSquared = dot(m, m);
 
   let alpha = params.scalars[PARAMS_ALPHA];

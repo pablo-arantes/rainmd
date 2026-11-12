@@ -125,6 +125,77 @@ export async function main(device) {
       simulation.release();
     }
   }
+  // ---- the restrained arm: does the Metropolis energy include the restraint? --
+  //
+  // 🔴 EVERY OTHER ARM HERE RUNS UNRESTRAINED, WHICH IS WHY THIS WAS MISSED.
+  // `#evaluatePotential` - the function `attemptVolumeChange` feeds to
+  // `metropolisWeight` - summed every term except the positional restraint,
+  // while `energy()`, which only reports, included it. So through the whole
+  // shipped NPT equilibration the reported potential was right and the
+  // accept/reject was wrong, and nothing in the output showed it. The
+  // `check:openmm` restrained arm cannot see it either: it compares energies at
+  // a configuration, never a decision.
+  {
+    const topology = parsePrmtop(await readFixture("ala-wat.prmtop", import.meta.url));
+    const coordinates = parseInpcrd(await readFixture("ala-wat.inpcrd", import.meta.url),
+      { expectedAtomCount: topology.atomCount });
+    const system = buildSystem(topology, {
+      constraints: "HBonds", rigidWater: true, cutoff: 1.0, box: coordinates.box,
+    });
+    const { soluteHeavyAtoms } = await import("../../shared/topology/restraints.js");
+    const { buildSelections } = await import("../../shared/analysis/selection.js");
+    const restraintAtoms = soluteHeavyAtoms(system, buildSelections(system));
+    const simulation = new GpuSimulation(device, system, {
+      timestep: 0.002, temperature: 298, friction: 1.0, seed: 20261112,
+      pressure: 1.0, barostatInterval: 25, rebuildInterval: 20,
+      // The page's own equilibration settings.
+      restraintForce: 500, restraintAtoms,
+      restraintReference: coordinates.positions,
+    });
+    try {
+      const velocities = new Float64Array(topology.atomCount * 3);
+      setVelocitiesToTemperature(system, velocities, 298, 29);
+      const start = createState(system, coordinates.positions, { velocities, tolerance: 1e-5 });
+      simulation.setState(start.positions, start.velocities);
+      await simulation.initialise();
+      // 🔴 WARMED FIRST, OR THE ARM CANNOT FAIL. A restraint evaluated at its
+      // own reference is exactly zero, so comparing the two sums at step 0
+      // would pass with the term omitted. The solute has to be off its
+      // reference for the term to have a value at all.
+      await simulation.run(2000, { blockSize: 20 });
+      const reported = await simulation.energy();
+      const move = await simulation.attemptVolumeChange();
+      const difference = move === null ? null
+        : Math.abs(move.oldPotential - reported.potential);
+      // The two sums reach the same total by different routes - `energy()` over
+      // per-atom arrays, `#evaluatePotential` over those plus the reciprocal
+      // partials - so they differ by f32 summation order. Measured absolute
+      // resolution of the device total on this system is 0.018 kJ/mol; 0.2 is
+      // an order above it. With the restraint omitted the gap is the restraint
+      // energy itself, which this arm also reports.
+      const bar = 0.2;
+      const restraintPresent = reported.positionRestraint > 1.0;
+      const agrees = difference !== null && difference < bar;
+      if (!restraintPresent || !agrees) failures += 1;
+      results.restrainedMetropolis = {
+        ok: restraintPresent && agrees,
+        restrainedAtoms: reported.restrainedAtoms,
+        positionRestraint: reported.positionRestraint,
+        reportedPotential: reported.potential,
+        metropolisOldPotential: move === null ? null : move.oldPotential,
+        difference,
+        bar,
+        // If this ever equals the restraint energy, the term has been dropped
+        // from the trial evaluation again.
+        differenceAsFractionOfRestraint: difference === null ? null
+          : difference / Math.max(reported.positionRestraint, 1e-9),
+        note: "the barostat must decide on the SAME potential the run reports; "
+          + "a restraint that acts on the forces and not on the accept/reject "
+          + "biases the volume while leaving every reported number right",
+      };
+    } finally { simulation.release(); }
+  }
+
   return { check: "Monte Carlo barostat against OpenMM and against itself", failures, results };
 }
 

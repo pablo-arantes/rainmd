@@ -48,6 +48,7 @@
  * also why `finish()` rather than a stream.
  */
 import { imageMolecules } from "./imaging.js";
+import { firstNonFinite, NonFiniteStateError } from "../finite.js";
 
 /** One AKMA time unit, in picoseconds. */
 const AKMA_PICOSECONDS = 0.04888821;
@@ -104,6 +105,25 @@ export class DcdWriter {
         + "vectors - a reader that finds the flag set and no record reads the "
         + "first coordinates as a unit cell",
       );
+    }
+    // 🔴 THE LAST LINE OF DEFENCE: NO FILE THIS PROGRAM WRITES MAY CONTAIN NaN.
+    // DCD is binary, so a non-finite coordinate is written as an IEEE-754 NaN
+    // that both readers accept in silence - measured, cpptraj says "Read 10
+    // frames and processed 10 frames" with no warning at all, and MDAnalysis
+    // loads the file and reports its own `n_frames`. Neither tool will ever
+    // tell the user, so the refusal has to happen here. Checked per frame
+    // rather than per run because a run goes non-finite partway through, and
+    // the frames before that point are the ones worth keeping.
+    const bad = firstNonFinite(positions.length === this.atomCount * 3
+      ? positions : positions.subarray(0, this.atomCount * 3));
+    if (bad >= 0) {
+      throw new NonFiniteStateError({
+        what: "a coordinate handed to the DCD writer",
+        index: bad,
+        detail: `Frame ${this.frameCount + 1} was refused, so the file holds `
+          + `the ${this.frameCount} frame(s) written before it and is still `
+          + "readable.",
+      });
     }
     // 🔴 WRAPPED INTO THE CELL BEFORE IT IS WRITTEN - see shared/traj/imaging.js.
     // Without this the file carries the integrator's unwrapped coordinates, and

@@ -55,14 +55,37 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     positions[atom * 3u] - origin[atom * 3u],
     positions[atom * 3u + 1u] - origin[atom * 3u + 1u],
     positions[atom * 3u + 2u] - origin[atom * 3u + 2u]);
-  atomicMax(&worst[0], bitcast<u32>(dot(delta, delta)));
+  let squared = bitcast<u32>(dot(delta, delta));
+  // 🔴 TWO SLOTS, AND THE SECOND IS THE WHOLE FIX FOR THE MEASUREMENT WINDOW.
+  // Slot 0 answers "has the list gone stale since it was BUILT?", so the caller
+  // clears it at every rebuild. That made the host's reading cover only the
+  // steps since the last rebuild INSIDE the block it read - and the page
+  // submits a block of rebuildInterval steps while the adaptive interval starts
+  // at 4, so a 20-step block contained five rebuilds and the host saw the last
+  // four steps of twenty. Slot 1 is cleared once per BLOCK instead, so it is
+  // the worst per-interval displacement anywhere in the block.
+  //
+  // Both slots take the same per-step value, which is what makes slot 1 the
+  // right quantity rather than a monotonically growing one: each interval
+  // measures from its own origin, and slot 1 keeps the maximum over those.
+  //
+  // 🔴 AND NO BACKTICK MAY APPEAR IN THIS COMMENT - it is inside a JS template
+  // literal, so one ends the WGSL string and the file stops parsing at a word
+  // in a sentence. This is the seventh time; the tree-wide node --check gate in
+  // npm test caught it before anything ran.
+  atomicMax(&worst[0], squared);
+  atomicMax(&worst[1], squared);
 }
 `;
 }
 
 /**
- * Encode one displacement pass. `worst` accumulates, so the caller clears it
- * when it copies `positions` into `origin` at a rebuild.
+ * Encode one displacement pass.
+ *
+ * `worst[0]` accumulates since the last rebuild, so the caller clears it when
+ * it copies `positions` into `origin`. `worst[1]` accumulates over the whole
+ * submitted block and is cleared once per block, which is what the host reads -
+ * see the note in the shader.
  */
 export function encodeDisplacement(device, encoder, resources, atomCount) {
   const maxPerDimension = device.limits.maxComputeWorkgroupsPerDimension;

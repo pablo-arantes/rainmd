@@ -13,6 +13,7 @@ import { parseInpcrd } from "../shared/amber/inpcrd.js";
 import { buildSystem } from "../shared/topology/system.js";
 import { DcdWriter } from "../shared/traj/dcd.js";
 import { writeRestart } from "../shared/traj/rst7.js";
+import { firstNonFinite } from "../shared/finite.js";
 import { requestMdDevice } from "../webgpu/runtime/device.js";
 import { yieldToBrowser, StopSignal } from "../webgpu/runtime/yield.js";
 import { GpuSimulation } from "../webgpu/simulation.js";
@@ -1122,6 +1123,14 @@ async function runOnDevice(stageConfig = {}) {
     restraintAtoms: stageConfig.restraintAtoms ?? [],
     restraintReference: hostState?.positions ?? loaded.coordinates.positions,
   });
+  // 🔴 DECLARED OUTSIDE THE `try`, SO `finally` CAN SEE THEM. `let` inside a
+  // `try` block is scoped to that block, and the whole point of the change
+  // below is that this stage's output is committed from `finally` - which runs
+  // whether the loop finished, threw, or was stopped by the user.
+  /** @type {DcdWriter|null} */
+  let writer = null;
+  let done = 0;
+  let began = 0;
   try {
     const start = startState(system, options);
     simulation.setState(start.positions, start.velocities);
@@ -1141,7 +1150,7 @@ async function runOnDevice(stageConfig = {}) {
         + `can reach on this box (floor ${diagnostics.toleranceFloor.toExponential(2)})`);
     }
 
-    const writer = trajectoryInterval > 0
+    writer = trajectoryInterval > 0
       ? new DcdWriter({
         molecules: moleculesOf(system.topology),
         atomCount: system.topology.atomCount,
@@ -1169,10 +1178,25 @@ async function runOnDevice(stageConfig = {}) {
           + "— RMSD is split four ways"
         : "; single body — no binder split"));
 
-    const began = performance.now();
-    let done = 0;
-    report(analysis.addFrame(lastPositions, await simulation.energy()));
-    if (writer !== null) writer.appendFrame(lastPositions, system.boxVectors);
+    began = performance.now();
+    // 🔴 THE LIVE BOX, NOT `system.boxVectors`, AND THAT WAS WRONG IN EVERY NPT
+    // FILE THIS PORT HAS EVER WRITTEN. `system.boxVectors` is fixed at
+    // `assembleSystem()`; the barostat changes the box on the simulation, and
+    // `#updateBox` mutates the simulation's OWN copy - so the writer never saw
+    // a volume move. Measured over 800 NPT steps whose live volume walked
+    // 20.4979 -> 19.2124 nm³, MDAnalysis read every one of the 8 frames as
+    // 20.5203 nm³: the starting cell, constant. The documented equilibration
+    // takes 20.52 -> 14.39 nm³, so the file was out by 43% in cell volume on
+    // every frame.
+    //
+    // 🔴 AND IT IS NOT ONLY THE CELL RECORD THAT IS WRONG. `DcdWriter` images
+    // molecule centroids into the box it is handed, so a box that is too large
+    // fails to wrap molecules that really have left the cell - the same class
+    // of defect as the imaging that was never implemented at all. Both the
+    // record a reader sees and the coordinates it holds depend on this.
+    const opening = await simulation.energy();
+    report(analysis.addFrame(lastPositions, opening));
+    if (writer !== null) writer.appendFrame(lastPositions, opening.boxVectors);
     while (done < steps) {
       stopSignal.throwIfStopped();
       // 🔴 A TRUE PAUSE: the gate is awaited BETWEEN blocks, so the integrator
@@ -1216,89 +1240,196 @@ async function runOnDevice(stageConfig = {}) {
       if (animate === "all" || (animate === "production" && isProduction)) {
         animateFrame();
       }
-      if (writer !== null) writer.appendFrame(lastPositions, system.boxVectors);
+      // The live box, for the reason above; `energy.boxVectors` is read from
+      // the simulation at this report, so it is the cell these coordinates
+      // were actually produced in.
+      if (writer !== null) writer.appendFrame(lastPositions, energy.boxVectors);
       element("download-pdb").disabled = false;
       element("download-metrics").disabled = false;
       element("download-rmsf").disabled = analysis.rmsf.frames < 2;
       await yieldToBrowser();
     }
+  } finally {
+    // 🔴 THE STAGE COMMITS ITS OUTPUT HERE, NOT AFTER THE LOOP, AND THAT IS THE
+    // WHOLE FIX. `hostState`, `finalState`, `writer.finish()`,
+    // `trajectories.push()` and both download buttons all used to sit after the
+    // `while`, so `stopSignal.throwIfStopped()` threw straight past them.
+    // Measured: Stop at step 2,500 of an equilibration with 5 frames already
+    // written left `trajectoryFiles []`, `trajectoryBytes 0`, both downloads
+    // disabled, `hostState` still at the post-minimise checksum, and a log line
+    // reading "stopped". Six hours of production cost the same. `finally` runs
+    // on the way out whether the loop returned, threw or was stopped, so there
+    // is one path and it cannot be skipped.
+    try {
+      await commitStage();
+    } catch (error) {
+      // 🔴 A FAILURE TO SAVE MUST NOT REPLACE THE FAILURE THAT CAUSED IT. An
+      // uncaught throw inside `finally` discards the in-flight exception, so a
+      // blow-up would be reported as whatever went wrong while saving it.
+      log(`  ⚠ this stage's output could not be saved: ${error.name}: ${error.message}`);
+    }
+    simulation.release();
+  }
+
+  /**
+   * Everything this stage produced, saved whether or not its loop finished.
+   *
+   * 🔴 WHAT IS SAFE TO KEEP DEPENDS ON THE STATE, NOT ON WHY THE LOOP ENDED.
+   * Classifying the error would mean enumerating every way a run can stop -
+   * user Stop, a non-finite state, a lost device, a neighbour overflow - and
+   * getting one wrong silently. Reading the state and asking whether it is a
+   * number answers the only question that matters: a clean stop hands its state
+   * on, a blown-up one must not, and a lost device cannot be read at all. The
+   * trajectory is kept in every one of those cases, because it is held on this
+   * side and the frames written before the trouble are real data.
+   */
+  async function commitStage() {
+    const interrupted = done < steps;
+    const label = stageConfig.trajectoryLabel ?? "run";
     const elapsed = (performance.now() - began) / 1000;
-    log(`  ${done} steps in ${elapsed.toFixed(1)} s — ${((elapsed / done) * 1000).toFixed(2)} ms/step`);
-
-    // The third moment worth a picture: where the stage ended up.
-    showCheckpoint(`at the end of ${stageConfig.stage ?? "the run"}`);
-    const after = await simulation.diagnostics();
-    if (after.barostat !== null) {
-      log(`  barostat: ${after.barostat.accepted}/${after.barostat.attempts} moves accepted `
-        + `(${(after.barostat.acceptanceRate * 100).toFixed(0)}%), `
-        + `${after.barostat.refusedForCutoff} refused because the cutoff would not fit; `
-        + `volume ${after.volume.toFixed(3)} nm³, density `
-        + `${densityOf(system, after.volume).toFixed(4)} g/cm³`);
+    if (done > 0) {
+      log(`  ${done} steps in ${elapsed.toFixed(1)} s — `
+        + `${((elapsed / done) * 1000).toFixed(2)} ms/step`
+        + (interrupted ? ` — stopped after ${done} of ${steps} steps` : ""));
+    } else {
+      // 🔴 NOT AN EARLY RETURN, AND THE FIRST VERSION OF THIS WAS. `done === 0`
+      // means no BLOCK completed, not that nothing was written: the opening
+      // frame is appended before the loop, and it is the structure this stage
+      // started from. Returning here discarded it and - worse - skipped the
+      // message below explaining why nothing was carried forward, so a run that
+      // went non-finite inside its first block said only "nothing to save".
+      // Caught by the blow-up arm of `npm run test:page:stop`.
+      log(`  no block completed — the stage ended after ${elapsed.toFixed(1)} s, `
+        + "so only the opening frame exists");
     }
-    log(`  constraints: ${after.maxShakeIterations} SHAKE iterations at most, `
-      + `iteration cap reached: ${after.shakeHitIterationCap || after.rattleHitIterationCap}`);
-    log(`  neighbours: ${after.neighbourRequired} needed of ${after.neighbourCapacity} capacity`);
-    // 🔴 THE SKIN LINE IS NOT OPTIONAL OUTPUT. If the neighbour list was ever
-    // stale, this run's forces were missing pairs inside the cutoff - a loss of
-    // exactness the energies and the trajectory will not show. Reporting the
-    // margin on every run, and the violation loudly when there is one, is the
-    // whole user-facing point of measuring it.
-    log(`  skin: ${(after.skin * 1000).toFixed(0)} pm, worst displacement `
-      + `${(after.worstDisplacement * 1000).toFixed(0)} pm — `
-      + `${(after.worstSkinUsage * 100).toFixed(0)}% of the budget used; `
-      + `rebuild every ${after.rebuildInterval} steps `
-      + `(asked ${after.requestedRebuildInterval})`);
-    if (after.skinViolations > 0) {
-      log(`  ⚠ the neighbour list was stale for ${after.stepsWithStaleList} of `
-        + `${done} steps, over ${after.skinViolations} block(s). Some pair may `
-        + `have been inside the cutoff and not counted. A pair that close is `
-        + `worth at most ${after.missedPairForceBound.toFixed(2)} kJ/mol/nm `
-        + `against an rms of a few hundred, so this costs exactness rather than `
-        + `stability — but the run is not exact. The rebuild interval was `
-        + `shortened to ${after.rebuildInterval}; a larger box or a shorter `
-        + `cutoff would give the skin room to grow instead.`);
-    }
-    log(`  device memory: peak ${(after.allocator.peakBytes / 2 ** 20).toFixed(1)} MiB`);
 
-    const state = await simulation.readState();
-    // 🔴 THE STAGE HANDS ON ITS WHOLE STATE, WHICH IT DID NOT BEFORE. This set
-    // `finalState` - used only by the .rst7 download - and left `hostState`
-    // alone, so the next stage read the structure from BEFORE this one. A
-    // production run therefore restarted from the minimised structure and
-    // threw the entire equilibration away, silently: the trajectory looked
-    // fine, the energies looked fine, and the solvent had never relaxed.
-    // Positions, velocities AND the box, because a barostat changes all three.
-    hostState = {
-      positions: Float64Array.from(state.positions),
-      velocities: Float64Array.from(state.velocities),
-      boxVectors: Float64Array.from(state.boxVectors),
-      step: simulation.step,
-    };
-    lastPositions = hostState.positions;
-    finalState = {
-      positions: state.positions,
-      velocities: state.velocities,
-      time: simulation.step * options.timestep,
-      box: boxFromVectors(state.boxVectors),
-    };
-    element("download-state").disabled = false;
-    log(`  carried forward: ${state.volume.toFixed(3)} nm³ box, `
-      + `${hostState.positions.length / 3} positions and their velocities`);
+    // 🔴 THE DEVICE MAY BE GONE, AND THE TRAJECTORY IS NOT ON IT. A driver
+    // reset or a destroyed context makes `readState` throw; the frames are in
+    // host memory, so that must not cost them.
+    let state = null;
+    try {
+      state = await simulation.readState();
+    } catch (error) {
+      log(`  ⚠ the device state could not be read (${error.name}: ${error.message}). `
+        + "The trajectory below is still whole up to the last frame written, "
+        + "because it is held in the page rather than on the GPU.");
+    }
+    const firstBad = state === null ? -1 : firstNonFinite(state.positions);
+    const usable = state !== null && firstBad < 0;
+
+    if (usable) {
+      showCheckpoint(interrupted
+        ? `where ${stageConfig.stage ?? "the run"} was stopped`
+        : `at the end of ${stageConfig.stage ?? "the run"}`);
+    }
+
+    try {
+      const after = await simulation.diagnostics();
+      if (after.barostat !== null) {
+        log(`  barostat: ${after.barostat.accepted}/${after.barostat.attempts} moves accepted `
+          + `(${(after.barostat.acceptanceRate * 100).toFixed(0)}%), `
+          + `${after.barostat.refusedForCutoff} refused because the cutoff would not fit; `
+          + `volume ${after.volume.toFixed(3)} nm³, density `
+          + `${densityOf(system, after.volume).toFixed(4)} g/cm³`);
+      }
+      log(`  constraints: ${after.maxShakeIterations} SHAKE iterations at most, `
+        + `iteration cap reached: ${after.shakeHitIterationCap || after.rattleHitIterationCap}`);
+      log(`  neighbours: ${after.neighbourRequired} needed of ${after.neighbourCapacity} capacity`);
+      // 🔴 THE SKIN LINE IS NOT OPTIONAL OUTPUT. If the neighbour list was ever
+      // stale, this run's forces were missing pairs inside the cutoff - a loss
+      // of exactness the energies and the trajectory will not show. Reporting
+      // the margin on every run, and the violation loudly when there is one, is
+      // the whole user-facing point of measuring it.
+      // 🔴 THE SKIN ACCOUNTING IS VOID IF THE STATE IS NOT A NUMBER, and
+      // printing it anyway is how this used to lie. The displacement detector
+      // throws BEFORE it updates its own maxima, so a blown-up stage reports
+      // `worstDisplacement 0` and `skinViolations 0` - which rendered as "worst
+      // displacement 0 pm — 0% of the budget used" for a run that had just
+      // died. Saying the numbers do not apply is the only honest line here.
+      if (usable) {
+        log(`  skin: ${(after.skin * 1000).toFixed(0)} pm, worst displacement `
+          + `${(after.worstDisplacement * 1000).toFixed(0)} pm — `
+          + `${(after.worstSkinUsage * 100).toFixed(0)}% of the budget used; `
+          + `rebuild every ${after.rebuildInterval} steps `
+          + `(asked ${after.requestedRebuildInterval})`);
+      } else {
+        log(`  skin: ${(after.skin * 1000).toFixed(0)} pm — the displacement `
+          + "accounting does not apply to this stage, because the detector "
+          + "stopped the run before it recorded a maximum");
+      }
+      if (usable && after.skinViolations > 0) {
+        log(`  ⚠ the neighbour list was stale for ${after.stepsWithStaleList} of `
+          + `${Math.max(done, 1)} steps, over ${after.skinViolations} block(s). Some pair may `
+          + `have been inside the cutoff and not counted. A pair that close is `
+          + `worth at most ${after.missedPairForceBound.toFixed(2)} kJ/mol/nm `
+          + `against an rms of a few hundred, so this costs exactness rather than `
+          + `stability — but the run is not exact. The rebuild interval was `
+          + `shortened to ${after.rebuildInterval}; a larger box or a shorter `
+          + `cutoff would give the skin room to grow instead.`);
+      }
+      log(`  device memory: peak ${(after.allocator.peakBytes / 2 ** 20).toFixed(1)} MiB`);
+    } catch (error) {
+      log(`  (diagnostics unavailable: ${error.message})`);
+    }
+
+    if (usable) {
+      // 🔴 THE STAGE HANDS ON ITS WHOLE STATE, WHICH IT DID NOT BEFORE. This set
+      // `finalState` - used only by the .rst7 download - and left `hostState`
+      // alone, so the next stage read the structure from BEFORE this one. A
+      // production run therefore restarted from the minimised structure and
+      // threw the entire equilibration away, silently: the trajectory looked
+      // fine, the energies looked fine, and the solvent had never relaxed.
+      // Positions, velocities AND the box, because a barostat changes all three.
+      hostState = {
+        positions: Float64Array.from(state.positions),
+        velocities: Float64Array.from(state.velocities),
+        boxVectors: Float64Array.from(state.boxVectors),
+        step: simulation.step,
+      };
+      lastPositions = hostState.positions;
+      // 🔴 THE RESTART CARRIES THE STAGE IT CAME FROM, SO A STALE ONE CANNOT
+      // MASQUERADE. Every stage used to write `<name>.rst7`, and the button
+      // stayed enabled from the previous stage - so stopping a production and
+      // pressing it handed over the EQUILIBRATION's state under a filename that
+      // said nothing, and the run continued from the wrong structure. That is
+      // the stage-handoff defect over again, reached through Stop.
+      finalState = {
+        positions: state.positions,
+        velocities: state.velocities,
+        time: simulation.step * options.timestep,
+        box: boxFromVectors(state.boxVectors),
+        stage: label,
+        interrupted,
+      };
+      element("download-state").disabled = false;
+      log(`  carried forward: ${state.volume.toFixed(3)} nm³ box, `
+        + `${hostState.positions.length / 3} positions and their velocities`
+        + (interrupted ? " — a further run of this stage continues from here" : ""));
+    } else if (state !== null) {
+      // 🔴 A NON-FINITE STATE IS NOT HANDED ON, AND THAT IS THE POINT OF
+      // CHECKING RATHER THAN CLASSIFYING. Writing it into `hostState` would
+      // start the next stage from NaN, and `finalState` would offer a restart
+      // the writer refuses - so the handoff stops here and says so.
+      log(`  ⚠ this stage's final state is not a number (first at component `
+        + `${firstBad}, atom ${Math.floor(firstBad / 3)}), so it has NOT been `
+        + "carried forward and no restart is offered for it. The next stage "
+        + "still holds the last good state.");
+      if (finalState !== null) {
+        log(`    the restart button still offers the ${finalState.stage ?? "earlier"} `
+          + "state, which is the last one that was a number");
+      }
+    }
+
     if (writer !== null && writer.frameCount > 0) {
       const bytes = writer.finish();
-      trajectories.push({
-        label: stageConfig.trajectoryLabel ?? "run",
-        bytes,
-        frames: writer.frameCount,
-      });
+      trajectories.push({ label, bytes, frames: writer.frameCount });
       element("download-dcd").disabled = false;
       const total = trajectories.reduce((sum, t) => sum + t.frames, 0);
       log(`  trajectory: ${writer.frameCount} frames, `
         + `${(bytes.length / 2 ** 20).toFixed(2)} MiB — `
-        + `${trajectories.length} file(s) held, ${total} frames in total`);
+        + `${trajectories.length} file(s) held, ${total} frames in total`
+        + (interrupted ? ", kept despite the run not finishing" : ""));
     }
-  } finally {
-    simulation.release();
   }
 }
 
@@ -1358,10 +1489,12 @@ element("download-dcd").addEventListener("click", () => {
   for (const entry of trajectories) {
     log(`    ${loaded.name}_${entry.label}.dcd — ${entry.frames} frames`);
   }
-  log("  load them in order against the .prmtop; cpptraj and MDAnalysis both "
-    + "take a list of trajectories for one topology");
-  log(`  wrote ${loaded.name}.dcd — open it with the .prmtop you loaded, in `
-    + `cpptraj, MDAnalysis, VMD or PyMOL`);
+  // 🔴 NO SUMMARY LINE NAMING A FILE THAT WAS NEVER WRITTEN. This used to log
+  // `wrote <name>.dcd` after writing `<name>_equil.dcd` and `<name>_prod_1.dcd`,
+  // so the one filename a reader could copy was the one that did not exist.
+  log("  load them in order against the .prmtop you loaded; cpptraj and "
+    + "MDAnalysis both take a list of trajectories for one topology, and VMD "
+    + "and PyMOL will open them one at a time");
 });
 
 element("download-state").addEventListener("click", () => {
@@ -1373,9 +1506,15 @@ element("download-state").addEventListener("click", () => {
     time: finalState.time,
     title: `RainMD ${loaded.name}`,
   });
-  download(`${loaded.name}.rst7`, text, "text/plain");
-  log(`  wrote ${loaded.name}.rst7 — an AMBER restart, so this run can be `
-    + `continued here, in the notebooks, or in AMBER`);
+  // 🔴 THE FILENAME NAMES THE STAGE. Every stage wrote `<name>.rst7`, and the
+  // button stayed enabled across stages - so a stopped production handed over
+  // the equilibration's state under a filename that said nothing about it.
+  const stage = finalState.stage ?? "run";
+  const name = `${loaded.name}_${stage}.rst7`;
+  download(name, text, "text/plain");
+  log(`  wrote ${name} — an AMBER restart from ${stage}`
+    + (finalState.interrupted === true ? " (which was stopped early)" : "")
+    + ", so this run can be continued here, in the notebooks, or in AMBER");
 });
 
 /** g/cm^3, so the number means something to a chemist. */
@@ -1547,6 +1686,11 @@ window.rainmd = {
   get selections() { return selections; },
   // The stage handoff is only checkable from outside if the state is reachable.
   get hostState() { return hostState; },
+  // 🔴 WHICH STAGE THE OFFERED RESTART BELONGS TO. A stopped stage used to
+  // leave the previous stage's restart on an enabled button under a filename
+  // that named no stage, so the only way to gate that is to expose the label.
+  get restartStage() { return finalState === null ? null : (finalState.stage ?? "run"); },
+  get restartInterrupted() { return finalState === null ? null : finalState.interrupted === true; },
   // The first panel's time column, so a gate can check it is monotonic - two
   // stages superimposed is only visible as time going backwards.
   plotRows() { return plot === null ? null : plot.panels[0].rows.map((r) => r.time); },

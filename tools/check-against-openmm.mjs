@@ -38,6 +38,18 @@ const CASES = [
     build: { constraints: "HBonds", rigidWater: true, cutoff: 1.0 },
     evaluate: { method: "PME", alpha: 2.6282608939112583, grid: [24, 24, 24] },
   },
+  // 🔴 THE TRUNCATED-OCTAHEDRON CASE IS DELIBERATELY NOT HERE, AND ITS ABSENCE
+  // IS A FINDING RATHER THAN AN OVERSIGHT. `test/fixtures/ala-oct.*` and
+  // `ala-oct-pme.json` exist and the reciprocal sum on that box is gated - by an
+  // exact lattice sum in `test/physics.test.js`, which is the oracle that found
+  // the transposed wave vector in the first place. What cannot be gated here
+  // yet is the whole system: against OpenMM on that box the DIRECT-space terms
+  // disagree by 0.082 kJ/mol in LJ (3.07e-5) and 2.115 in Coulomb (1.36e-4),
+  // and both are independent of the PME grid - identical at 24^3 and 48^3 - so
+  // they are not the grid floor and not the reciprocal sum. Adding the case
+  // with a tolerance wide enough to pass would be loosening a tolerance to make
+  // a check pass, which this project does not do. See docs/REVIEW.md.
+
   {
     // 🔴 THE EQUILIBRATION STAGE'S RESTRAINT, SCORED AT A DISPLACED STRUCTURE.
     // A positional restraint evaluated at its own reference is exactly zero, so

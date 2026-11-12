@@ -26,4 +26,6 @@ The AMBER force-field parameters embedded in the files under test/fixtures/ are
 not covered by this licence. They were produced by AmberTools' tleap from the
 ff14SB and TIP3P parameter sets and remain under their own terms; see
 https://ambermd.org/. They are included only as small test systems, and
-tools/oracle/make_fixtures.sh regenerates all of them from a local AmberTools.
+tools/oracle/make_fixtures.sh builds all of them from a local AmberTools except
+two-body.prmtop/inpcrd, whose recipe was not recorded; README.md and
+test/amber-parse.test.js say so, and the test fails if that stops being true.

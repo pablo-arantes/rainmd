@@ -200,6 +200,20 @@ const ATOM_LIST_BASE: u32 = ${layout.atomListBase}u;
 @group(0) @binding(5) var<storage, read> constraintAtoms: array<u32>;
 @group(0) @binding(6) var<storage, read> constraintParams: array<f32>;
 @group(0) @binding(7) var<storage, read_write> diagnostics: array<atomic<u32>>;
+// 🔴 THE CONSTRAINT CORRECTION, KEPT SEPARATELY, AND IT IS A CONDITIONING FIX
+// RATHER THAN A CHANGE OF ALGORITHM. The velocity used to be recovered as
+// (positions - reference) / halfStep, which is algebraically exactly
+// v + correction / halfStep - but computes a ~1e-3 nm displacement by
+// subtracting two coordinates that span the box, so its absolute f32 error is
+// span * eps however small the answer is. Divided by the half step that is a
+// 2.4e-4 nm/ps kick, every step, on every constrained atom - against a
+// hydrogen's thermal 1.6 nm/ps. Measured: NVE drift rose 29x per halving of the
+// timestep with constraints on and was flat with them off, and the f64 host
+// shows drift FALLING as the timestep falls. Accumulating the correction keeps
+// a ~1e-5 nm number in its own float, where it has relative precision: the
+// per-step velocity error falls from 5.89e-5 to 7.23e-9 nm/ps on this box, and
+// the gain grows with the box because the old error scales with the span.
+@group(0) @binding(8) var<storage, read_write> corrections: array<f32>;
 
 fn loadVector(source: ptr<storage, array<f32>, read_write>, atom: u32) -> vec3<f32> {
   return vec3<f32>((*source)[atom * 3u], (*source)[atom * 3u + 1u], (*source)[atom * 3u + 2u]);
@@ -211,6 +225,19 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   if (cluster >= CLUSTER_COUNT) { return; }
   let constraintBegin = clusterData[CONSTRAINT_START_BASE + cluster];
   let constraintEnd = clusterData[CONSTRAINT_START_BASE + cluster + 1u];
+
+  // The accumulator is per drift, so this thread clears its own atoms first.
+  // There are two drifts per BAOAB step and each needs its own correction.
+  {
+    let zeroBegin = clusterData[ATOM_START_BASE + cluster];
+    let zeroEnd = clusterData[ATOM_START_BASE + cluster + 1u];
+    for (var slot = zeroBegin; slot < zeroEnd; slot = slot + 1u) {
+      let atom = clusterData[ATOM_LIST_BASE + slot];
+      corrections[atom * 3u] = 0.0;
+      corrections[atom * 3u + 1u] = 0.0;
+      corrections[atom * 3u + 2u] = 0.0;
+    }
+  }
 
   var iterations = 0u;
   var converged = false;
@@ -248,12 +275,20 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
       let denominator = 2.0 * (inverseA + inverseB) * projection;
       if (abs(denominator) < 1e-20) { continue; }
       let lambda = -error / denominator;
-      positions[a * 3u] = positions[a * 3u] + lambda * inverseA * old.x;
-      positions[a * 3u + 1u] = positions[a * 3u + 1u] + lambda * inverseA * old.y;
-      positions[a * 3u + 2u] = positions[a * 3u + 2u] + lambda * inverseA * old.z;
-      positions[b * 3u] = positions[b * 3u] - lambda * inverseB * old.x;
-      positions[b * 3u + 1u] = positions[b * 3u + 1u] - lambda * inverseB * old.y;
-      positions[b * 3u + 2u] = positions[b * 3u + 2u] - lambda * inverseB * old.z;
+      let shiftA = lambda * inverseA * old;
+      let shiftB = lambda * inverseB * old;
+      positions[a * 3u] = positions[a * 3u] + shiftA.x;
+      positions[a * 3u + 1u] = positions[a * 3u + 1u] + shiftA.y;
+      positions[a * 3u + 2u] = positions[a * 3u + 2u] + shiftA.z;
+      positions[b * 3u] = positions[b * 3u] - shiftB.x;
+      positions[b * 3u + 1u] = positions[b * 3u + 1u] - shiftB.y;
+      positions[b * 3u + 2u] = positions[b * 3u + 2u] - shiftB.z;
+      corrections[a * 3u] = corrections[a * 3u] + shiftA.x;
+      corrections[a * 3u + 1u] = corrections[a * 3u + 1u] + shiftA.y;
+      corrections[a * 3u + 2u] = corrections[a * 3u + 2u] + shiftA.z;
+      corrections[b * 3u] = corrections[b * 3u] - shiftB.x;
+      corrections[b * 3u + 1u] = corrections[b * 3u + 1u] - shiftB.y;
+      corrections[b * 3u + 2u] = corrections[b * 3u + 2u] - shiftB.z;
     }
     iterations = iteration + 1u;
     achieved = worst;
@@ -271,11 +306,18 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let inverseStep = 1.0 / integrator.halfStep;
   let atomBegin = clusterData[ATOM_START_BASE + cluster];
   let atomEnd = clusterData[ATOM_START_BASE + cluster + 1u];
+  // 🔴 ONE THREAD OWNS A CLUSTER, SO NO ATOMICS ARE NEEDED HERE. A cluster is a
+  // connected set of constraints and no atom belongs to two clusters, so this
+  // thread is the only writer of these components - which is also why the loop
+  // below is over UNIQUE atoms and the host's equivalent had to be taught to
+  // deduplicate: iterating constraints instead touches a water oxygen twice,
+  // harmless when the velocity was overwritten and a factor-of-two error the
+  // moment the update becomes an addition.
   for (var slot = atomBegin; slot < atomEnd; slot = slot + 1u) {
     let atom = clusterData[ATOM_LIST_BASE + slot];
-    velocities[atom * 3u] = (positions[atom * 3u] - reference[atom * 3u]) * inverseStep;
-    velocities[atom * 3u + 1u] = (positions[atom * 3u + 1u] - reference[atom * 3u + 1u]) * inverseStep;
-    velocities[atom * 3u + 2u] = (positions[atom * 3u + 2u] - reference[atom * 3u + 2u]) * inverseStep;
+    velocities[atom * 3u] = velocities[atom * 3u] + corrections[atom * 3u] * inverseStep;
+    velocities[atom * 3u + 1u] = velocities[atom * 3u + 1u] + corrections[atom * 3u + 1u] * inverseStep;
+    velocities[atom * 3u + 2u] = velocities[atom * 3u + 2u] + corrections[atom * 3u + 2u] * inverseStep;
   }
 
   // 🔴 NON-CONVERGENCE MUST REACH THE HOST. A cluster whose atoms have been
@@ -461,7 +503,7 @@ export function encodeLangevinStep(device, encoder, resources, atomCount, layout
       shakeShader(atomCount, layout, clusters.gridWidth),
       [resources.integrator, resources.positions, resources.reference, resources.velocities,
         resources.clusterData, resources.constraintAtoms, resources.constraintParams,
-        resources.diagnostics], clusters);
+        resources.diagnostics, resources.corrections], clusters);
   };
   const rattle = () => {
     if (layout.clusterCount === 0) return;
@@ -610,7 +652,7 @@ export function encodeConstrainPositions(device, encoder, resources, atomCount, 
     layout: pipeline.getBindGroupLayout(0),
     entries: [resources.integrator, resources.positions, resources.reference,
       resources.velocities, resources.clusterData, resources.constraintAtoms,
-      resources.constraintParams, resources.diagnostics]
+      resources.constraintParams, resources.diagnostics, resources.corrections]
       .map((allocation, binding) => ({ binding, resource: { buffer: allocation.buffer } })),
   }));
   pass.dispatchWorkgroups(x, y, z);

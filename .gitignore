@@ -11,3 +11,8 @@ leap.log
 tleap.log
 
 .DS_Store
+
+# Review probes are scratch, not gates - docs/REVIEW.md says which five were
+# promoted. Keeping these out stops a probe nothing runs from rotting into a
+# claim nobody checks.
+tools/gpu/review-*.mjs
