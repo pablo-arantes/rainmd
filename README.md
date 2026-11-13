@@ -169,8 +169,8 @@ by a confusing failure in a lane someone has to remember to run.
 npm run check:openmm      # per-term host energies and forces against OpenMM
 npm run check:gradients   # every analytic force against a numerical gradient
 npm test                  # the host suite
-npm run test:gpu          # all thirteen kernel checks, through Dawn
-npm run test:gpu:page     # the same thirteen, in a real headless Chrome
+npm run test:gpu          # all fourteen kernel checks, through Dawn
+npm run test:gpu:page     # the same fourteen, in a real headless Chrome
 npm run check:mdanalysis  # the live metrics against MDAnalysis, on a DCD this wrote
 node tools/run-reference-md.mjs 200    # a short simulation on the host oracle
 npm run run:gpu -- --steps=2000       # a real GPU run, writing /tmp/rainmd-run.dcd

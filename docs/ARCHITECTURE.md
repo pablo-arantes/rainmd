@@ -243,11 +243,19 @@ library animates the frames itself. The cartoons are genuinely good and the
 wrapper around it, `web/viewer.js`, is only 363 lines — which is where the
 impression of a light integration comes from.
 
-🔴 **BUT THE LIBRARY IS 920 KB MINIFIED, 297 KB GZIPPED, AND RAINMD IN ITS
-ENTIRETY IS 159 KB GZIPPED.** Parser, force field, PME, integrator, barostat,
-analysis, viewer and page together are a little over half the size of the
-viewer alone, so vendoring it would roughly triple what a visitor downloads in
-order to add one representation. LocalFold's own `index.html` carries a comment
+🔴 **BUT THE LIBRARY IS 920 KB MINIFIED, 297 KB GZIPPED, AND RAINMD WITHOUT A
+VIEWER IS 187 KB GZIPPED.** Parser, force field, PME, integrator, barostat,
+analysis and page together are under two thirds the size of the viewer alone,
+so vendoring it would roughly triple what a visitor downloads in order to add
+one representation.
+
+🔴 **AND THIS PARAGRAPH'S ARGUMENT WAS OVERTAKEN BY THE DECISION IT ARGUES
+AGAINST.** Mol\* was vendored at ten times py2Dmol's bytes - 1486 KiB gzipped
+against 149 - so a first visit is about 1.63 MiB rather than the 310 KiB this
+section was written beside. `docs/STATUS.md` → "What the viewer costs now" has
+the measurement and the reasoning. The size argument below is kept because it is
+still the right way to think about the trade, not because its numbers are
+current. LocalFold's own `index.html` carries a comment
 about the consequence: it is "765 KB of blocking classic script", and because
 `app.js` is a module that runs only after that has parsed, the page is on
 screen and interactive with its Fold button doing nothing at all for the
@@ -267,7 +275,13 @@ rather than showing a prediction:
   every hydrogen unless `{keepH: true}` is passed, and a `molObj` cache that has
   to be nulled by hand for a coordinate update to show.
 
-So the ribbon is native WGSL. What *was* taken is the geometry, which is common
+🔴 **AND THE RIBBON IS NO LONGER WHAT THE PAGE DRAWS.** Mol\* does, with its own
+secondary-structure assignment; `web/viewer.js` and `shared/analysis/ribbon.js`
+are retained and gated but the page's module graph does not reach them. The
+section below describes a renderer you will not see on screen, and is kept for
+the geometry it records rather than as a description of the page.
+
+So the ribbon was native WGSL. What *was* taken is the geometry, which is common
 to 3Dmol and PyMOL and is the part worth borrowing: a Catmull-Rom spline through
 the alpha carbons, subdivided (eight samples a residue here, 3Dmol uses about
 six); a per-residue frame whose direction is made continuous along the chain;
