@@ -4,8 +4,11 @@
   "description": "Molecular dynamics in the browser on WebGPU, from AMBER topologies",
   "type": "module",
   "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
-    "test": "node --test test/",
+    "test": "node --test test/*.test.js",
     "test:gpu": "node tools/gpu-node.mjs tools/gpu/check-bonded.mjs && node tools/gpu-node.mjs tools/gpu/check-fft.mjs && node tools/gpu-node.mjs tools/gpu/check-pme.mjs && node tools/gpu-node.mjs tools/gpu/check-nonbonded.mjs && node tools/gpu-node.mjs tools/gpu/check-forces.mjs && node tools/gpu-node.mjs tools/gpu/check-integrator.mjs && node tools/gpu-node.mjs tools/gpu/check-minimiser.mjs && node tools/gpu-node.mjs tools/gpu/check-barostat.mjs && node tools/gpu-node.mjs tools/gpu/check-analysis.mjs && node tools/gpu-node.mjs tools/gpu/check-displacement.mjs && node tools/gpu-node.mjs tools/gpu/probe-ribbon-shader.mjs && node tools/gpu-node.mjs tools/gpu/check-restraints.mjs && node tools/gpu-node.mjs tools/gpu/check-blowup.mjs && node tools/gpu-node.mjs tools/gpu/check-capacity.mjs",
     "check:openmm": "node tools/check-against-openmm.mjs",
     "check:gradients": "node tools/check-force-gradients.mjs",

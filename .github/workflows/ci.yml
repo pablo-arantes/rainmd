@@ -22,15 +22,26 @@ on:
 
 jobs:
   host:
-    name: host suite, no GPU required
+    name: host suite on node ${{ matrix.node }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # 🔴 A MATRIX, BECAUSE THE FIRST RUN OF THIS WORKFLOW FOUND A REAL
+    # PORTABILITY BUG. `npm test` was `node --test test/`, and passing a
+    # DIRECTORY to --test is only searched by newer Node: on 22 it tried to
+    # LOAD `test/` as a module and the whole suite failed with MODULE_NOT_FOUND.
+    # It passed locally on 26 and would have failed for anyone on 20 or 22. One
+    # version in CI would have fixed the symptom and left the next one lurking,
+    # so the floor and the current release are both run.
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['20', '22', '24']
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: ${{ matrix.node }}
 
       # 🔴 NO `npm ci`, DELIBERATELY. Nothing in this lane imports a package:
       # every specifier in `test/`, `tools/check-against-openmm.mjs`,
