@@ -1,0 +1,51 @@
+# The lane a hosted runner can actually do.
+#
+# 🔴 GITHUB'S RUNNERS HAVE NO GPU, SO THIS COVERS LESS THAN HALF THE SUITE, AND
+# SAYING SO IS THE POINT. Everything under `npm run test:gpu`, `test:slow` and
+# `test:page:*` needs a real WebGPU device - Dawn in Node or a headless Chrome
+# with one - and none of that exists here. A green tick on this workflow means
+# the host reference, the parsers, the claim gates and the triclinic oracles
+# pass. It does not mean a kernel does.
+#
+# What this DOES cover is the class of defect that has broken this repository
+# most often: a backtick inside a WGSL template literal, which stops a file
+# parsing and has happened seven times. `npm test` walks the whole tree with
+# `node --check`, so that is caught here in seconds rather than by a confusing
+# failure in a GPU lane someone has to remember to run.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  host:
+    name: host suite, no GPU required
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # 🔴 NO `npm ci`, DELIBERATELY. Nothing in this lane imports a package:
+      # every specifier in `test/`, `tools/check-against-openmm.mjs`,
+      # `tools/check-force-gradients.mjs` and `tools/check-triclinic.mjs` is
+      # relative or a `node:` builtin, which is the same no-build-step property
+      # AGENTS.md requires of `shared/` and `cpu/`. The one dependency,
+      # `webgpu@0.3.0`, is a native optional module for the GPU lane that does
+      # not load on this runner anyway.
+      - name: no dependencies are needed
+        run: |
+          echo "third-party imports in the CI lane:"
+          grep -hoE '^import .* from "[^."][^"]*"' \
+            test/*.js tools/check-against-openmm.mjs \
+            tools/check-force-gradients.mjs tools/check-triclinic.mjs \
+            | grep -v '"node:' && { echo "unexpected dependency"; exit 1; } || echo "  none"
+
+      - name: host suite, oracles and the triclinic sums
+        run: npm run test:ci

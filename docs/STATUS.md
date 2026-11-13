@@ -2,8 +2,19 @@
 
 Every number here was measured by a command in this repository, on
 2026-11-06, on an Apple M-series Mac (Metal, macOS 14.5) with OpenMM 8.4.
-Re-run them with `npm run check:openmm`, `npm run check:gradients`,
-`npm run test:gpu`, `npm run check:mdanalysis` and `npm test`.
+Re-run them with the three lanes: **`npm run test:ci`** (12 s, no GPU and no
+Python - the host suite, the OpenMM reference comparison, the gradients and the
+triclinic oracles), **`npm run test:gpu`** (the fourteen kernel checks, and
+`test:gpu:page` for the same fourteen in Chrome), and **`npm run test:slow`**
+(9 minutes - the NPT unit cell, the thermostat against its setpoint across
+timesteps, the drift's timestep scaling, and the live metrics against
+MDAnalysis). `npm run test:page:all` drives the nine browser lanes.
+
+🔴 **ONLY THE FIRST LANE RUNS IN CI, BECAUSE HOSTED RUNNERS HAVE NO GPU.** That
+is under half the suite and `.github/workflows/ci.yml` says so rather than
+implying a green tick means more than it does. It does catch the defect class
+that has broken this repository seven times - a backtick in a WGSL template
+literal - because `npm test` parse-checks the whole tree.
 
 ## Validated
 

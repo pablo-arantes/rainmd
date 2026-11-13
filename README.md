@@ -120,7 +120,33 @@ Needs a browser with WebGPU: Chrome or Edge 113+, or Safari 18+.
 
 ## Checking it yourself
 
-Every claim in [docs/STATUS.md](docs/STATUS.md) is a command.
+Every claim in [docs/STATUS.md](docs/STATUS.md) is a command, and the commands
+are grouped into three lanes by what they need to run.
+
+**`npm run test:ci`** — about 12 seconds, no GPU and no Python. The host suite,
+the per-term comparison against OpenMM's committed reference dumps, every
+analytic force against a numerical gradient, and the triclinic oracles. This is
+the lane `.github/workflows/ci.yml` runs on every push, because nothing in it
+imports a package: every specifier is relative or a `node:` builtin, which is
+the same no-build-step property `AGENTS.md` requires of `shared/` and `cpu/`.
+
+**`npm run test:gpu`** — the fourteen kernel checks through Dawn, and
+`test:gpu:page` the same fourteen in a real headless Chrome. Needs a WebGPU
+device.
+
+**`npm run test:slow`** — about nine minutes, needs a GPU. The checks that have
+to integrate for a while before they mean anything: the NPT unit cell read back
+by MDAnalysis, the reported temperature against its setpoint at 1, 2 and 4 fs,
+the energy drift's timestep scaling, and the live metrics against MDAnalysis.
+`npm run test:page:all` drives the nine browser lanes.
+
+🔴 **A GREEN TICK ON CI COVERS LESS THAN HALF THE SUITE, AND THE WORKFLOW SAYS
+SO.** GitHub's hosted runners have no GPU, so every kernel, every page lane and
+every long integration is outside it. What CI does catch is the class of defect
+that has broken this repository most often — a backtick inside a WGSL template
+literal, which stops a file parsing and has happened seven times: `npm test`
+walks the whole tree with `node --check`, so it is caught in seconds instead of
+by a confusing failure in a lane someone has to remember to run.
 
 ```bash
 npm run check:openmm      # per-term host energies and forces against OpenMM

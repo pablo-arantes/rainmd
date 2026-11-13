@@ -43,7 +43,10 @@
     "test:gpu:capacity": "node tools/gpu-node.mjs tools/gpu/check-capacity.mjs",
     "check:timestep": "node tools/gpu-node.mjs tools/gpu/check-timestep.mjs",
     "check:triclinic": "node tools/check-triclinic.mjs",
-    "check:thermostat": "node tools/gpu-node.mjs tools/gpu/check-thermostat.mjs"
+    "check:thermostat": "node tools/gpu-node.mjs tools/gpu/check-thermostat.mjs",
+    "test:ci": "npm test && npm run check:openmm && npm run check:gradients && npm run check:triclinic",
+    "test:slow": "npm run check:npt-box && npm run check:thermostat && npm run check:timestep && npm run check:mdanalysis",
+    "test:page:all": "npm run test:page:simulate && npm run test:page:stop && npm run test:page:handoff && npm run test:page:strides && npm run test:page:panels && npm run test:page:animate && npm run test:page:examples && npm run test:page:view && npm run test:page:layout"
   },
   "optionalDependencies": {
     "webgpu": "0.3.0"
