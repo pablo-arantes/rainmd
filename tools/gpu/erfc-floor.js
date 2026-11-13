@@ -26,6 +26,9 @@ import { readBuffer, encodePass } from "../../webgpu/runtime/execution.js";
 
 const WORKGROUP = 64;
 
+/** Degree of the polynomial in `t`, i.e. the number of Horner lines. */
+const DEGREE = 9;
+
 /**
  * The relative error one f32 rounding of the exponential's argument costs.
  *
@@ -47,13 +50,28 @@ export function argumentUlpBound(zMax, roundings = 4) {
   return roundings * 2 ** (Math.floor(Math.log2(argument)) - 23);
 }
 
-/** The shader's own arithmetic, in f64 with every step rounded to f32. */
+/**
+ * The shader's own arithmetic, in f64 with every step rounded to f32.
+ *
+ * 🔴 THE COEFFICIENTS ARE READ OUT OF THE SHIPPED SHADER, AND THE COUNT IS
+ * ASSERTED. Writing them out again here would make this a comparison of two
+ * copies that could drift apart, and the emulation would then agree with
+ * nothing in particular. Parsing the string means there is one set of
+ * constants in the tree - but a regex that silently matched fewer of them
+ * would quietly report a wrong number, which is the defect this whole file
+ * exists to remove, so a short count throws instead.
+ */
 export function emulateErfc(z) {
   const round = Math.fround;
   const t = round(1 / round(1 + round(0.5 * z)));
   const coefficients = [...ERFC_FUNCTION.matchAll(/p = (-?[\d.]+) \+ t \* p;/g)]
     .map((match) => round(Number(match[1])));
-  const lead = round(Number(/var p = (-?[\d.]+);/.exec(ERFC_FUNCTION)[1]));
+  const lead = round(Number(/var p = (-?[\d.]+);/.exec(ERFC_FUNCTION)?.[1] ?? NaN));
+  if (coefficients.length !== DEGREE || !Number.isFinite(lead)) {
+    throw new Error(`read ${coefficients.length} of ${DEGREE} erfc coefficients `
+      + `and a lead term of ${lead}: the shader's formatting changed, and this `
+      + "emulation would report a wrong floor rather than fail");
+  }
   let p = lead;
   for (const coefficient of coefficients) p = round(coefficient + round(t * p));
   return round(t * round(Math.exp(round(-round(z * z) + p))));
