@@ -647,29 +647,41 @@ stanza, not a delete.**
 > but resolving it properly needs about 16× the sampling. The sampling-point
 > result above makes that unnecessary.
 >
-> **The fix, specified and measured but not applied.** The two velocities differ
-> by exactly `(halfStep/m)·F`, so the earlier estimator is recoverable from
-> quantities already read back:
+> 🔴 **THE OBVIOUS FIX WAS TRIED AND IS WRONG, AND THE WAY IT FAILED IS THE
+> USEFUL PART.** The two velocities differ by `(halfStep/m)·F`, so the earlier
+> estimator looks recoverable from quantities already read back. On `ala-vac`
+> that reconstruction reproduces the true pre-kick temperature to 0.2–0.8 K:
 >
 > ```
->   dt/fs   post-kick (shipped)   reconstructed pre-kick   true pre-kick
->       1        309.87                312.45                 312.40
->       2        303.13                314.99                 314.80
->       4        271.98                316.83                 316.08
+>   dt/fs   post-kick (shipped)   reconstructed   true pre-kick
+>       1        309.87              312.45          312.40
+>       2        303.13              314.99          314.80
+>       4        271.98              316.83          316.08
 > ```
 >
-> agreeing to 0.2–0.8 K, the residual being RATTLE. On the **host** that is a
-> few lines. On the **device** it is not free: `energy()` gets its kinetic energy
-> from a device reduction that is handed velocities only, so the shader would
-> have to take the forces and the half step and subtract before squaring — a
-> contained kernel change, but a kernel change, and it alters a user-visible
-> number. That is a deliberate choice about which estimator to publish, so it is
-> left for the owner:
+> Implemented on the device and the host, it made the reported temperature
+> **far worse**: +5.88 / +21.44 / **+86.85** K at 1 / 2 / 4 fs, against OpenMM's
+> +0.42 / +1.63 / +4.45 and the shipped −0.02 / −2.08 / −6.36. ⟨U⟩ was
+> byte-identical, confirming only the estimator had moved.
 >
-> - **match OpenMM** (report one half kick earlier) so the two are directly
->   comparable — this port's bias becomes +3 K at 4 fs instead of −6 K;
-> - or **report both**, and say in the panel which is which.
+> **Why: RATTLE.** The closing half kick is followed by a velocity projection, so
+> `v_post = RATTLE(v_pre + (halfStep/m)·F)`. Subtracting the kick does not invert
+> the projection — it adds back exactly the bond-directed velocity RATTLE had
+> legitimately removed. `ala-vac` carries 12 constraints, 18% of its 3N;
+> `ala-wat` carries 1176, **33%** of 3N. The reconstruction was validated on the
+> fixture where it happens to work, which is the same error as validating a
+> triclinic claim on a rectangular box.
 >
+> **The correct route, not taken here.** The estimator has to be computed
+> *inside* the step, before the closing kick, rather than reconstructed after it:
+> a kinetic pass encoded in `encodeLangevinStep` ahead of the final `kick()`,
+> writing a buffer `energy()` reads, and emitted only on the last step of a block
+> since that is the one the host reports. That is a change to the step encoding
+> rather than to a reduction, so it wants doing deliberately.
+>
+> The change was reverted; the tree reports the post-kick estimator as before,
+> and `docs/STATUS.md` tells a user it carries an O(dt²) offset.
+
 > Either way the sampled ensemble was never in question, which is the thing a
 > user actually needed to know and the reason this was worth chasing past three
 > refuted hypotheses.

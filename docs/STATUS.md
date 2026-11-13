@@ -451,13 +451,30 @@ refuted on the way and are recorded in `docs/REVIEW.md` so they are not retried:
 the constraint schedule, the RATTLE count, and an attempt to settle it from ⟨U⟩,
 which at 60 ps per arm is too noisy by about 16×.
 
-🔴 **THE FIX IS SPECIFIED AND MEASURED BUT NOT APPLIED, BECAUSE IT IS A CHOICE.**
-The two velocities differ by exactly `(halfStep/m)·F`, and reconstructing the
-earlier estimator from quantities already read back reproduces it to 0.2–0.8 K.
-On the host that is a few lines; on the device the kinetic reduction is handed
-velocities only, so the shader would need the forces and the half step. Whether
-to match OpenMM's point (making this port's bias +3 K at 4 fs instead of −6 K)
-or to report both is the owner's call.
+🔴 **AND THE OBVIOUS FIX WAS TRIED, FAILED, AND WAS REVERTED.** The two
+velocities differ by `(halfStep/m)·F`, so the earlier estimator looks
+recoverable from what is already read back — and on `ala-vac` the reconstruction
+reproduces the true pre-kick temperature to 0.2–0.8 K. Implemented, it made the
+reported temperature **far worse**: +5.88 / +21.44 / **+86.85** K at 1 / 2 / 4 fs
+against OpenMM's +0.42 / +1.63 / +4.45. ⟨U⟩ was byte-identical, so only the
+estimator moved.
+
+The cause is RATTLE. The closing half kick is followed by a velocity projection,
+so `v_post = RATTLE(v_pre + (halfStep/m)·F)`, and subtracting the kick does not
+invert the projection — it adds back the bond-directed velocity RATTLE had
+removed. `ala-vac` carries 12 constraints, 18% of its 3N; `ala-wat` carries
+1176, **33%**. The reconstruction was validated on the fixture where it happens
+to work, which is the same mistake as checking a triclinic claim on a
+rectangular box.
+
+**The correct route** is to compute the estimator *inside* the step, before the
+closing kick, rather than reconstruct it afterwards: a kinetic pass encoded
+ahead of the final kick, emitted on the last step of a block since that is the
+one the host reports. That changes the step encoding rather than a reduction,
+and has not been done.
+
+So the shipped number is still the post-kick estimator, with the O(dt²) offset
+above. Treat it as carrying that offset and do not tune a setpoint against it.
 
 **Superseded:** Two hypotheses tested this pass, both refuted:
 
