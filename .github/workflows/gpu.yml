@@ -50,6 +50,13 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
+
+      # 🔴 THESE LANES DO NEED A PACKAGE, UNLIKE THE HOSTED ONE. `webgpu@0.3.0`
+      # is Dawn in Node and is what `tools/gpu-node.mjs` imports; the hosted
+      # `ci` lane needs nothing, and carrying that assumption over here cost a
+      # whole run to `Cannot find package 'webgpu'`. It is an optionalDependency
+      # pinned for this platform, so a plain `npm ci` brings it.
+      - run: npm ci
       - run: npm run test:gpu
 
   slow:
@@ -58,6 +65,13 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
+
+      # 🔴 THESE LANES DO NEED A PACKAGE, UNLIKE THE HOSTED ONE. `webgpu@0.3.0`
+      # is Dawn in Node and is what `tools/gpu-node.mjs` imports; the hosted
+      # `ci` lane needs nothing, and carrying that assumption over here cost a
+      # whole run to `Cannot find package 'webgpu'`. It is an optionalDependency
+      # pinned for this platform, so a plain `npm ci` brings it.
+      - run: npm ci
       # The NPT unit cell, the thermostat against its setpoint across
       # timesteps, the drift's timestep scaling, and the live metrics against
       # MDAnalysis. About nine minutes, and the reason this runner exists:
@@ -71,4 +85,11 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
+
+      # 🔴 THESE LANES DO NEED A PACKAGE, UNLIKE THE HOSTED ONE. `webgpu@0.3.0`
+      # is Dawn in Node and is what `tools/gpu-node.mjs` imports; the hosted
+      # `ci` lane needs nothing, and carrying that assumption over here cost a
+      # whole run to `Cannot find package 'webgpu'`. It is an optionalDependency
+      # pinned for this platform, so a plain `npm ci` brings it.
+      - run: npm ci
       - run: npm run test:page:all

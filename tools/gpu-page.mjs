@@ -121,9 +121,26 @@ async function cdp(url, method, params = {}) {
   return result;
 }
 
+// 🔴 PYTHON'S STDERR IS KEPT, BECAUSE THROWING IT AWAY COST A CI RUN. This was
+// `stdio: "ignore"` with no error handler, so a python that failed to start was
+// indistinguishable from one that was slow: the harness waited its full ten
+// seconds and reported "tools/serve.py never answered on port 4151" - a message
+// that describes the symptom and names no cause. The note below already
+// complains about exactly that class of message in a different place.
+let serverStderr = "";
+let serverSpawnError = null;
+let serverExit = null;
 const server = remoteArg === undefined
-  ? spawn("python3", ["tools/serve.py", "--port", String(PORT)], { stdio: "ignore" })
+  ? spawn("python3", ["tools/serve.py", "--port", String(PORT)],
+    { stdio: ["ignore", "ignore", "pipe"] })
   : { kill() {} };
+if (remoteArg === undefined) {
+  server.stderr?.on("data", (chunk) => { serverStderr += String(chunk); });
+  // An ENOENT from spawn arrives as an event, not a throw, so without this
+  // handler a missing python3 is silence.
+  server.on("error", (error) => { serverSpawnError = error; });
+  server.on("exit", (code, signal) => { serverExit = { code, signal }; });
+}
 // 🔴 `require` DOES NOT EXIST IN AN ES MODULE, and the catch swallowed the
 // ReferenceError into "no Chrome found" - a probe reporting the absence of the
 // thing it failed to look for. statSync is imported at the top instead.
@@ -160,7 +177,22 @@ if (remoteArg === undefined) {
   }
   if (!listening) {
     server.kill();
-    console.error(`tools/serve.py never answered on port ${PORT}`);
+    console.error(`tools/serve.py never answered on port ${PORT} after 10 s`);
+    if (serverSpawnError !== null) {
+      console.error(`  python3 could not be started: ${serverSpawnError.message}`);
+      console.error(`  PATH=${process.env.PATH}`);
+    }
+    if (serverExit !== null) {
+      console.error(`  it exited with code ${serverExit.code}`
+        + `${serverExit.signal === null ? "" : ` on ${serverExit.signal}`}`);
+    }
+    if (serverStderr.trim() !== "") {
+      console.error(`  its stderr said:\n${serverStderr.trimEnd()}`);
+    }
+    if (serverSpawnError === null && serverExit === null && serverStderr.trim() === "") {
+      console.error("  it is still running and said nothing, so the port is "
+        + "bound by something else or blocked");
+    }
     process.exit(2);
   }
 }
