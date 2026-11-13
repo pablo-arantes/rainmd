@@ -23,7 +23,7 @@ round trip. In NPT — which is the default — the barostat is the one exceptio
 a Metropolis test is a decision about a number, so the trial energy comes back
 to the browser once per volume move, every 25 steps by default. Measured, that
 costs 0.167 ms/step. It reproduces OpenMM's energies to
-1.5e-6 and its per-atom forces to 8.8e-5 on the notebooks' own configuration,
+1.4e-6 and its per-atom forces to 8.8e-5 on the notebooks' own configuration,
 and runs the 1190-atom test system at **about 133 ns/day** on an Apple laptop
 GPU — roughly 60x the host reference it is checked against. Throughput falls
 with system size: the same solute in a 12 Å water box is 2854 atoms and
@@ -130,8 +130,8 @@ the lane `.github/workflows/ci.yml` runs on every push, because nothing in it
 imports a package: every specifier is relative or a `node:` builtin, which is
 the same no-build-step property `AGENTS.md` requires of `shared/` and `cpu/`.
 
-**`npm run test:gpu`** — the fourteen kernel checks through Dawn, and
-`test:gpu:page` the same fourteen in a real headless Chrome. Needs a WebGPU
+**`npm run test:gpu`** — the fifteen kernel checks through Dawn, and
+`test:gpu:page` the same fifteen in a real headless Chrome. Needs a WebGPU
 device.
 
 **`npm run test:slow`** — about nine minutes, needs a GPU. The checks that have
@@ -169,8 +169,10 @@ by a confusing failure in a lane someone has to remember to run.
 npm run check:openmm      # per-term host energies and forces against OpenMM
 npm run check:gradients   # every analytic force against a numerical gradient
 npm test                  # the host suite
-npm run test:gpu          # all fourteen kernel checks, through Dawn
-npm run test:gpu:page     # the same fourteen, in a real headless Chrome
+npm run test:gpu          # all fifteen kernel checks, through Dawn
+npm run test:gpu:page     # the same fifteen, in a real headless Chrome
+npm run test:gpu:erfc     # the f32 erfc floor the Coulomb tolerance is derived from
+npm run fit:erfc          # refit the ten erfc coefficients the kernel ships
 npm run check:mdanalysis  # the live metrics against MDAnalysis, on a DCD this wrote
 node tools/run-reference-md.mjs 200    # a short simulation on the host oracle
 npm run run:gpu -- --steps=2000       # a real GPU run, writing /tmp/rainmd-run.dcd

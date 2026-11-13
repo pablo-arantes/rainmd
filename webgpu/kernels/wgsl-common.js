@@ -125,19 +125,33 @@ fn cellOfPosition(p: vec3<f32>) -> u32 {
 /**
  * erfc, and the Gaussian that its derivative needs.
  *
- * 🔴 THE FRACTIONAL ERROR IS 1.19e-6 AND THAT IS THE f32 FLOOR, NOT THE
- * COEFFICIENTS. These are Numerical Recipes' `erfcc` constants, whose published
- * claim is a fractional error below 1.2e-7 - in double precision. Measured
- * here in f32 against the Cody reference in shared/erf.js, over the domain a
- * 1.0 nm cutoff actually uses (alpha*r up to 2.8), the error is **1.191e-6**,
- * twenty times f32 epsilon. Refitting all ten coefficients by least squares
- * against relative error over exactly that domain gives **1.191e-6** - the same
- * number to four digits. So the limit is the arithmetic: `exp(-x*x + P(t))` has
- * an argument near -7.8 at the cutoff, and one f32 ulp there is 4.7e-7 of
- * absolute argument error, which an exponential turns straight into relative
- * output error. A better polynomial cannot help, and this is why the nonbonded
- * differential test's Coulomb tolerance is derived from 1.19e-6 rather than
- * from f32 epsilon.
+ * 🔴 THE FRACTIONAL ERROR IS 1.44e-6 AND THAT IS THE f32 FLOOR, NOT THE
+ * COEFFICIENTS. `npm run test:gpu:erfc` measures it on the running device
+ * against Cody's reference in shared/erf.js, over the domain the direct-space
+ * kernel actually evaluates - alpha*r up to sqrt(-ln(2*tolerance)) = 2.628 at
+ * the notebooks' 1.0 nm and 5e-4, which is the same number at every cutoff
+ * because alpha scales as 1/cutoff. Dawn and Chrome both report **1.4377e-6**,
+ * worst at alpha*r = 2.607, against a derived cap of 1.9e-6.
+ *
+ * 🔴 AND THE LIMIT IS THE EXPONENTIAL, WHICH IS WHY A BETTER FIT CANNOT HELP.
+ * `exp(-z*z + P(t))` has an argument of -6.91 at the cutoff, where one f32 ulp
+ * is 4.8e-7 of ABSOLUTE argument error - and an exponential turns that straight
+ * into RELATIVE output error. The same arithmetic emulated on the host with
+ * Math.fround gives 7.4e-7, so the device adds 1.1e-6 on top of it: WGSL
+ * specifies `exp` only to 3 ulp, and that term dominates. The polynomial's own
+ * error is 1.0e-7 in exact arithmetic, seven times under the floor it sits on.
+ * This is why the nonbonded differential test's Coulomb bar is derived from the
+ * measured erfc error rather than from f32 epsilon.
+ *
+ * 🔴 THE TEN CONSTANTS COME FROM `npm run fit:erfc`, NOT FROM A BOOK. That
+ * script fits P(t) = ln(erfc(z)) + z^2 - ln(t) over t in (0, 1], by Lawson
+ * reweighting towards minimax, and its header explains why the logarithm is the
+ * right thing to fit: d(ln erfc) = dP, so an absolute error in P is a relative
+ * error in erfc. The domain is the whole of z >= 0 rather than the cutoff's
+ * slice, so widening a cutoff cannot walk off the end of the fit. The constant
+ * term is not free - P(0) = -ln(2*sqrt(pi)) = -1.2655121 exactly, and the
+ * fitted value sits 0.88 of an f32 ulp from it, so any correct fit must land
+ * there.
  *
  * 🔴 AND AN ABSOLUTE-ERROR APPROXIMATION WOULD BE USELESS HERE. Abramowitz &
  * Stegun 7.1.26 is accurate to 1.5e-7 ABSOLUTE, and erfc at the cutoff is
@@ -148,15 +162,15 @@ export const ERFC_FUNCTION = `
 fn erfcApprox(x: f32) -> f32 {
   let z = abs(x);
   let t = 1.0 / (1.0 + 0.5 * z);
-  var p = 0.17087277;
-  p = -0.82215223 + t * p;
-  p = 1.48851587 + t * p;
-  p = -1.13520398 + t * p;
-  p = 0.27886807 + t * p;
-  p = -0.18628806 + t * p;
-  p = 0.09678418 + t * p;
-  p = 0.37409196 + t * p;
-  p = 1.00002368 + t * p;
+  var p = 0.169316679;
+  p = -0.815667093 + t * p;
+  p = 1.47734284 + t * p;
+  p = -1.12492001 + t * p;
+  p = 0.273412347 + t * p;
+  p = -0.18460983 + t * p;
+  p = 0.0964981765 + t * p;
+  p = 0.374116182 + t * p;
+  p = 1.00002289 + t * p;
   p = -1.26551223 + t * p;
   let ans = t * exp(-z * z + p);
   return select(2.0 - ans, ans, x >= 0.0);

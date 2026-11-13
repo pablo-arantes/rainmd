@@ -4,8 +4,8 @@ Every number here was measured by a command in this repository, on
 2026-11-06, on an Apple M-series Mac (Metal, macOS 14.5) with OpenMM 8.4.
 Re-run them with the three lanes: **`npm run test:ci`** (12 s, no GPU and no
 Python - the host suite, the OpenMM reference comparison, the gradients and the
-triclinic oracles), **`npm run test:gpu`** (the fourteen kernel checks, and
-`test:gpu:page` for the same fourteen in Chrome), and **`npm run test:slow`**
+triclinic oracles), **`npm run test:gpu`** (the fifteen kernel checks, and
+`test:gpu:page` for the same fifteen in Chrome), and **`npm run test:slow`**
 (9 minutes - the NPT unit cell, the thermostat against its setpoint across
 timesteps, the drift's timestep scaling, and the live metrics against
 MDAnalysis). `npm run test:page:all` drives the nine browser lanes.
@@ -35,12 +35,13 @@ literal - because `npm test` parse-checks the whole tree.
 | **bonded WGSL kernel** | the host reference, on a real GPU | energy 1.8e-8 to 5.3e-7; force within 7–24% of the derived f32 bound |
 | **cell list** | treated as a partition of the atoms | exact at 3 geometries: every atom in exactly one cell, every slice sorted, total correct |
 | **neighbour list** | an O(N²) host enumeration, as a *set* | **0 missing, 0 spurious, 0 duplicated** at 2×2×2, 3×3×3 and 4×4×4 cells |
-| **direct-space nonbonded kernel** | the host reference | LJ 5.1e-7 – 6.0e-7, Coulomb 4.9e-8 – 3.1e-7, worst force 6.5e-3 kJ/mol/nm against rms ~500 (1.3e-5) |
+| **direct-space nonbonded kernel** | the host reference | LJ 5.1e-7 – 6.0e-7, Coulomb 1.4e-8 – 3.1e-7, worst force 6.5e-3 kJ/mol/nm against rms ~500 (1.3e-5) |
+| **f32 `erfc` in the WGSL kernel** (`npm run test:gpu:erfc`) | Cody's reference in `shared/erf.js`, on the device at 65536 points | **1.4377e-6** worst relative over the αr ≤ 2.628 a 1.0 nm cutoff reaches, against a **derived** cap of 1.9e-6; identical to every digit in Dawn and in Chrome |
 | **mixed-radix FFT index map** | a naive DFT, on the host, before any WGSL was written | 33 sizes (every 2/3/5-smooth value to 128), both directions, worst 9.5e-16 |
 | **WGSL FFT** | the naive DFT, on random data, 4 grids including non-cubic | 2.9e-7 – 6.6e-7 over 9–12 stages |
 | **PME spread grid** | the host's own spread, compared point by point | 3.0e-6 – 3.2e-6 relative; fixed-point headroom **0.15% of 128** charge units used |
 | **PME energy and forces** | the host reference, 3 grids | energy 6.3e-8 – 2.1e-6, worst force 1.9e-3 kJ/mol/nm against rms 96 (2.0e-5) |
-| **the whole GPU force path** | **OpenMM**, notebooks' configuration | bonded 1.8e-8, LJ 6.0e-7, Coulomb (direct + reciprocal + self) 1.4e-6, **total 1.5e-6**, **per-atom forces 8.8e-5** |
+| **the whole GPU force path** | **OpenMM**, notebooks' configuration | bonded 1.7e-8, LJ 6.0e-7, Coulomb (direct + reciprocal + self) 1.3e-6, **total 1.4e-6**, **per-atom forces 8.8e-5** |
 | counter-based PRNG uniform | the host's own, in f32 and f64 | **40000/40000 bit-identical** (the 2^-24 form it replaced: 20045/40000) |
 | **one device step** | the host integrator, with the same noise *and* the same forces | positions 2.0e-6 nm, velocities 1.1e-3 nm/ps against a 4.8 nm/ps scale |
 | **constraint geometry after 5000 device steps** | the constraint lengths themselves | worst 5.0e-6 of a bond length; 17 SHAKE iterations at most; iteration cap never reached |
@@ -52,7 +53,7 @@ literal - because `npm test` parse-checks the whole tree.
 | AMBER restart writer | this port's own `inpcrd` reader | positions exact, velocities 1.0e-7 nm/ps (the format's precision) |
 | **the page, driving a real GPU run** | headless Chrome, through the UI controls | GPU minimise, then 4000 NPT steps at 2.01 ms/step on the two-body fixture; nine frames; all five exports offered; render pass validated |
 | **LJ tail correction** | **OpenMM**, isolated by toggling `useDispersionCorrection` | **-41.537158 kJ/mol, relative error 1.0e-8** |
-| **barostat energy at a forced volume scale** | OpenMM, at the same molecule-COM-scaled coordinates | 1.5e-6 to 1.7e-6 relative at length scales 1.00, 1.02 and 0.97 |
+| **barostat energy at a forced volume scale** | OpenMM, at the same molecule-COM-scaled coordinates | 1.4e-6 to 1.5e-6 relative at length scales 1.00, 1.02 and 0.97 |
 | **NPT equilibration**, 48 ps at 1 bar / 298 K | TIP3P water's density | **0.5868 → 0.9924 ± 0.0116 g/cm³ at 298.7 K**, 50% move acceptance (TIP3P is ~0.98) |
 | device minimiser | monotonicity, constraints, and whether dynamics runs afterwards | potential -11857 → -13450 kJ/mol in 23 iterations / 0.18 s, monotone, constraints 5.0e-6, 500 steps afterwards ran at 311.7 K |
 | **the viewer actually draws** | a clipped screenshot of the canvas, decoded | 8.6% of pixels off-background, 2661 distinct colours, smooth shading gradients |
@@ -101,7 +102,7 @@ literal - because `npm test` parse-checks the whole tree.
 | **the browser lane waits for the page, rather than sleeping** | three consecutive runs, and a forced module-scope throw | the old fixed 2500 ms delay failed about one run in three once the module graph grew, reporting `Cannot read properties of undefined (reading 'device')` — which is indistinguishable from the real `app.js` evaluation bug. It now polls for `window.rainmd` and names the cause |
 | thermostat | 150 steps at 50/ps friction | 295.8 K against a 298 K setpoint (0.7%) |
 | **the page, in real Chrome** | headless Chrome 157 over CDP, `npm run test:page` | loads, probes `apple / metal-3`, runs the bonded kernel: energy 1.75e-8, force 7.2% of the f32 bound — **identical to the Dawn lane** |
-| **every kernel in both lanes** | the same thirteen check modules run through Dawn and through Chrome | 0 failures in both; the full force path agrees between implementations to 1e-8 on the total |
+| **every kernel in both lanes** | the same fifteen check modules run through Dawn and through Chrome | 0 failures in both; the full force path agrees between implementations to 1e-8 on the total |
 | determinism | two independent runs of the nonbonded check | **bit-identical** energies, including the arm that reaches them via a grow-and-rebuild |
 | **the reported temperature holds the setpoint across the timestep range** | `npm run check:thermostat`, NVT friction 10/ps, 60 ps at each of 1 / 2 / 4 fs | offsets **+0.46 / −0.33 / +0.88 K**, growth over the range **0.42 K**; it was −0.02 / −2.08 / −6.36, and OpenMM's own is +0.42 / +1.63 / +4.45 |
 | **a blown-up run is refused rather than completed** | `npm run test:gpu:blowup`, 40 fs on the solvated fixture | stops at step 20 with `NonFiniteStateError` naming the timestep; a 2 fs run of the same length is **not** refused and reports a finite potential and 382 K; identical in Dawn and Chrome |
@@ -142,16 +143,24 @@ worth having:
   cap and report failure **on a correct result**. This is also why OpenMM's own
   default is 1e-5. The device clamps the request to the floor and says so in
   its diagnostics.
-- **f32 `erfc` floor, 1.19e-6 relative.** WGSL has no `erfc`, so the kernel uses
-  the Numerical Recipes rational form. Its published accuracy is 1.2e-7
-  *fractional* — in double precision; in f32 over the domain a 1.0 nm cutoff
-  uses it is 1.191e-6, twenty times f32 epsilon. Refitting all ten coefficients
-  by least squares against relative error over exactly that domain gives
-  **1.191e-6** — the same number to four digits, which is the evidence that the
-  limit is the arithmetic and not the fit: `exp(-x² + P(t))` has an argument
-  near −7.8 at the cutoff, where one f32 ulp is 4.7e-7 of absolute argument
-  error and an exponential turns that straight into relative output error. The
-  nonbonded test's Coulomb bar is derived from this, not from f32 epsilon.
+- **f32 `erfc` floor, 1.4377e-6 relative — measured on the device, by
+  `npm run test:gpu:erfc`.** WGSL has no `erfc`, so the kernel evaluates
+  `t·exp(−z² + P(t))` with a degree-9 `P` fitted by `npm run fit:erfc`. The
+  floor is the *arithmetic*, not the fit: that exponential's argument is −6.91
+  at a 1.0 nm cutoff, where one f32 ulp is 4.8e-7 of **absolute** argument
+  error, and an exponential turns that straight into **relative** output error.
+  The polynomial's own error is 1.0e-7 in exact arithmetic, seven times under
+  the floor it sits on, so refitting it cannot help — and the same arithmetic
+  emulated on the host with `Math.fround` gives only 7.4e-7, so **1.1e-6 of the
+  1.44e-6 is the backend's `exp`**, which WGSL specifies merely to 3 ulp. The
+  nonbonded test's Coulomb bar is four times whatever the running device
+  measures, capped at a bound derived from that ulp spacing so it can never
+  widen to admit a broken `erfc`.
+
+  This number was previously recorded here as 1.191e-6, with no command behind
+  it; the review found a third figure (1.478e-6) in a host emulation. The
+  device settles it, and the earlier value **understated** what the GPU
+  delivers by 21%.
 
 ## Not yet written
 

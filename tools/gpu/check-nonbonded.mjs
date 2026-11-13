@@ -35,6 +35,7 @@ import { encodeCellList } from "../../webgpu/kernels/cell-list.js";
 import { encodeNeighbours, NeighbourOverflowError } from "../../webgpu/kernels/neighbours.js";
 import { encodeNonbonded } from "../../webgpu/kernels/nonbonded.js";
 import { ONE_4PI_EPS0 } from "../../shared/units.js";
+import { measureErfcFloor } from "./erfc-floor.js";
 
 /**
  * Each arm is a cutoff and, optionally, a deliberately wrong capacity.
@@ -86,6 +87,25 @@ export async function main(device) {
   const allocator = new GpuAllocator(device);
   const results = [];
   let failures = 0;
+
+  // 🔴 THE COULOMB BAR IS MEASURED ON THIS DEVICE, NOT TYPED IN. It used to be
+  // `const erfcFloor = 1.19e-6` with a comment claiming the number had been
+  // measured, which nothing in the tree could reproduce - and the figure was
+  // 21% below what the device actually delivers, because every emulation of it
+  // used a correctly-rounded `Math.exp` where WGSL allows `exp` 3 ulp. Dawn on
+  // Metal measures 1.44e-6; Chrome on the same machine need not agree, and a
+  // bar taken from the running device follows it.
+  //
+  // 🔴 AND IT IS CAPPED, SO IT CANNOT WIDEN TO ADMIT A BROKEN erfc. The cap is
+  // `argumentUlpBound`, derived in erfc-floor.js from the f32 spacing of the
+  // exponential's argument; a measurement above it is a failure here, not a
+  // licence to raise the tolerance. erfc(z) is evaluated only for r <= cutoff,
+  // and alpha*cutoff = sqrt(-ln(2*tolerance)) is the same 2.628 at every one of
+  // this check's cutoffs, so one measurement covers all the arms.
+  const erfcProbe = await measureErfcFloor(device, allocator,
+    { zMax: alphaFromTolerance(1.0, 0.0005) });
+  const erfcFloor = Math.min(erfcProbe.worst, erfcProbe.bound);
+  if (!(erfcProbe.worst < erfcProbe.bound)) failures += 1;
 
   for (const arm of ARMS) {
     const cutoff = arm.cutoff;
@@ -260,12 +280,10 @@ export async function main(device) {
       }
       const rms = Math.sqrt(sumSquares / (atomCount * 3));
 
-      // 🔴 THE COULOMB BAR IS SET BY THE f32 erfc, NOT BY f32 EPSILON. The
-      // approximation in wgsl-common.js carries 1.19e-6 relative error over
-      // this domain, measured, and that is a floor no summation order can
-      // improve. The LJ bar is f32 accumulation over a few hundred terms with
-      // cancellation between the r^-12 and r^-6 parts.
-      const erfcFloor = 1.19e-6;
+      // 🔴 THE COULOMB BAR IS SET BY THE f32 erfc, NOT BY f32 EPSILON, and
+      // `erfcFloor` is what this device measured a few lines above - a floor no
+      // summation order can improve. The LJ bar is f32 accumulation over a few
+      // hundred terms with cancellation between the r^-12 and r^-6 parts.
       const ljBar = 2e-5;
       const coulombBar = 4 * erfcFloor;
       const forceBar = 1e-4;
@@ -304,6 +322,17 @@ export async function main(device) {
   return {
     check: "cell list, neighbour list and direct-space nonbonded against the host reference",
     failures,
+    // Where the Coulomb bar came from, so the report carries its own origin.
+    erfcFloor: {
+      measured: erfcProbe.worst,
+      cap: erfcProbe.bound,
+      used: erfcFloor,
+      coulombBar: 4 * erfcFloor,
+      atAlphaR: Number(erfcProbe.worstAt.toFixed(4)),
+      hostEmulation: erfcProbe.worstEmulated,
+      note: "measured on this device by tools/gpu/erfc-floor.js; the host "
+        + "emulation is a lower bound because WGSL allows exp 3 ulp",
+    },
     results,
     allocator: allocator.snapshot(),
   };
