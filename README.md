@@ -148,9 +148,12 @@ The GPU lanes can run in CI too, on a machine that has a GPU:
 SECURITY DESIGN.** This repository is public, and a workflow is code: were a
 fork's pull request able to reach a self-hosted runner, anyone who can open one
 could run whatever they liked on the machine it sits on. GitHub's own guidance
-is to pair self-hosted runners with private repositories only. Triggering on
-push-to-main, a nightly schedule and manual dispatch removes the path entirely,
-and the installer **refuses to run** if that ever stops being true. Worth
+is to pair self-hosted runners with private repositories only. Triggering on a
+nightly schedule and manual dispatch only removes the path entirely, and the
+installer **refuses to run** if that ever stops being true. It does not run on
+push either, which is a cost decision rather than a security one: the lanes are
+about eleven and a half minutes of a real GPU, so they run overnight and when
+`gh workflow run gpu` asks. Worth
 turning on either way: Settings → Actions → General → "Require approval for all
 external contributors".
 

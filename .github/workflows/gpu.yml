@@ -6,9 +6,15 @@
 # a pull request from a fork could otherwise run whatever they liked on the
 # machine the runner sits on. The repository's approval policy is
 # `first_time_contributors`, which means a returning contributor would not even
-# be prompted. Triggering only on push-to-main and manual dispatch removes the
+# be prompted. Triggering only on a schedule and manual dispatch removes the
 # path entirely - a fork's pull request never reaches this runner, whatever it
 # contains.
+#
+# 🔴 AND THERE IS NO `push` TRIGGER EITHER, WHICH IS A COST DECISION RATHER THAN
+# A SECURITY ONE. These lanes are about eleven and a half minutes of a real
+# GPU on somebody's desk, and running them on every commit to main spends that
+# whether the commit touched a kernel or not. The nightly schedule catches drift
+# and `gh workflow run gpu` covers the moment you actually want to know.
 #
 # Defence in depth, if you want it: Settings -> Actions -> General -> "Require
 # approval for all external contributors". That protects the hosted `ci`
@@ -28,14 +34,6 @@ on:
     # 03:17 UTC nightly. An odd minute, because the top of the hour is when
     # every scheduled workflow on GitHub queues at once.
     - cron: '17 3 * * *'
-  push:
-    branches: [main]
-    # Documentation changes cannot move a kernel, and this runs on somebody's
-    # actual desk.
-    paths-ignore:
-      - '**/*.md'
-      - 'LICENSE'
-      - '.github/workflows/ci.yml'
 
 # One run at a time: there is a single machine behind this, and a queue of
 # superseded runs competing for one GPU is worse than no queue.
