@@ -37,11 +37,19 @@ jobs:
       matrix:
         node: ['20', '22', '24']
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node }}
+          # 🔴 CACHING OFF, BECAUSE THIS LANE INSTALLS NOTHING. setup-node v5
+          # began enabling it automatically when it detects a package manager,
+          # and there is a package-lock.json here for the one optional native
+          # dependency the GPU lane uses. Caching an install that never happens
+          # would key a cache on a lockfile this job does not read, so it is
+          # switched off and the reason recorded - the step below asserts the
+          # lane needs no packages at all.
+          package-manager-cache: false
 
       # 🔴 NO `npm ci`, DELIBERATELY. Nothing in this lane imports a package:
       # every specifier in `test/`, `tools/check-against-openmm.mjs`,
