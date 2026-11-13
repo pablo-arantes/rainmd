@@ -42,7 +42,8 @@
     "check:npt-box": "node tools/gpu-node.mjs tools/gpu/write-trajectory.mjs --out=/tmp/rainmd-npt --steps=4000 --interval=250 --pressure=1 && python3 -I tools/oracle/check_npt_box.py --prefix=/tmp/rainmd-npt --prmtop=test/fixtures/ala-wat.prmtop",
     "test:gpu:capacity": "node tools/gpu-node.mjs tools/gpu/check-capacity.mjs",
     "check:timestep": "node tools/gpu-node.mjs tools/gpu/check-timestep.mjs",
-    "check:triclinic": "node tools/check-triclinic.mjs"
+    "check:triclinic": "node tools/check-triclinic.mjs",
+    "check:thermostat": "node tools/gpu-node.mjs tools/gpu/check-thermostat.mjs"
   },
   "optionalDependencies": {
     "webgpu": "0.3.0"

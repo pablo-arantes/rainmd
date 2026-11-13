@@ -136,6 +136,8 @@ export class GpuSimulation {
     // overflow at one rebuild had vanished from the diagnostics by the time
     // anyone looked. Measured: required 1519 of 1499 at V = 29.20 nm3, then
     // "ok" at 1482 one step later.
+    // The step whose in-step kinetic sample `resources.kinetic` holds, or null.
+    this.kineticSampledAtStep = null;
     this.worstNeighbourRequired = 0;
     this.neighbourGrowths = 0;
     this.barostatAccepted = 0;
@@ -305,7 +307,17 @@ export class GpuSimulation {
       // descriptor; a conditional bind group costs a second pipeline.
       noise: keep(allocator.allocate("noise", atoms * 12, WRITABLE)),
       kinetic: keep(allocator.allocate("kinetic", atoms * 4, STORAGE)),
+      // 🔴 A SECOND KINETIC ARRAY, BECAUSE THE TWO SAMPLES ANSWER DIFFERENT
+      // QUESTIONS. `kinetic` holds the post-step velocity, which is what the
+      // conserved total energy needs; `kineticEarly` holds the sample taken
+      // inside the step before the closing half kick, which is where OpenMM
+      // reports its temperature. Pairing the early velocity with the
+      // end-of-step position inflated the measured NVE fluctuation from 6.36 to
+      // 15.51 kJ/mol, so the total must not use it.
+      kineticEarly: keep(allocator.allocate("kineticEarly", atoms * 4, STORAGE)),
       kineticPartials: keep(allocator.allocate("kineticPartials",
+        this.kineticPartialCount * 4, READABLE)),
+      kineticEarlyPartials: keep(allocator.allocate("kineticEarlyPartials",
         this.kineticPartialCount * 4, READABLE)),
       // barostat
       moleculeStart: keep(allocator.upload("moleculeStart",
@@ -468,8 +480,17 @@ export class GpuSimulation {
       for (let index = 0; index < steps; index += 1) {
         const rebuild = this.stepsSinceRebuild >= this.rebuildInterval;
         if (rebuild) this.stepsSinceRebuild = 0;
+        // 🔴 ONLY ON THE LAST STEP OF THE BLOCK, BECAUSE THAT IS THE ONE THE
+        // HOST REPORTS. The kinetic sample has to be taken inside the step -
+        // see the note in integrate.js - and taking it on every step would pay
+        // for a reduction the host never reads. `energy()` below checks that
+        // the sample it finds belongs to the current step and falls back to a
+        // post-step one if not, so the number is never of mixed provenance.
+        const lastOfBlock = index === steps - 1;
         encodeLangevinStep(this.device, encoder, this.resources, this.atomCount,
-          this.clusters.layout, () => this.#encodeForces(encoder, rebuild));
+          this.clusters.layout, () => this.#encodeForces(encoder, rebuild),
+          { sampleKinetic: lastOfBlock });
+        if (lastOfBlock) this.kineticSampledAtStep = this.step + 1;
         this.stepsSinceRebuild += 1;
         this.step += 1;
       }
@@ -1052,6 +1073,13 @@ export class GpuSimulation {
   async energy() {
     const { device, allocator, resources, atomCount } = this;
     const encoder = device.createCommandEncoder({ label: "rainmd.energy" });
+    // 🔴 THE IN-STEP SAMPLE IS USED WHEN IT BELONGS TO THIS STEP, AND A
+    // POST-STEP ONE IS ENCODED WHEN IT DOES NOT - which happens at step 0, in
+    // the minimiser, and either side of a barostat move. The two differ by a
+    // half kick and so by an O(dt^2) bias of opposite sign, so which was used
+    // is reported rather than left to be guessed.
+    const inStep = this.kineticSampledAtStep === this.step;
+    // The post-step sample is always taken: it is what the total energy needs.
     encodeKineticEnergy(device, encoder, resources, atomCount);
     const maxPerDimension = device.limits.maxComputeWorkgroupsPerDimension;
     const workgroups = Math.ceil(atomCount / REDUCE_WORKGROUP);
@@ -1059,15 +1087,19 @@ export class GpuSimulation {
     const gridWidth = x === workgroups ? workgroups : maxPerDimension;
     const key = `reduce:kinetic:${atomCount}:${gridWidth}`;
     const pipeline = pipelineCacheFor(device).get(key, reduceShader(atomCount, gridWidth));
-    const pass = encoder.beginComputePass({ label: key });
-    pass.setPipeline(pipeline);
-    pass.setBindGroup(0, device.createBindGroup({
-      layout: pipeline.getBindGroupLayout(0),
-      entries: [resources.kinetic, resources.kineticPartials]
-        .map((allocation, binding) => ({ binding, resource: { buffer: allocation.buffer } })),
-    }));
-    pass.dispatchWorkgroups(x, y, z);
-    pass.end();
+    const reduce = (source, into) => {
+      const pass = encoder.beginComputePass({ label: key });
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, device.createBindGroup({
+        layout: pipeline.getBindGroupLayout(0),
+        entries: [source, into]
+          .map((allocation, binding) => ({ binding, resource: { buffer: allocation.buffer } })),
+      }));
+      pass.dispatchWorkgroups(x, y, z);
+      pass.end();
+    };
+    reduce(resources.kinetic, resources.kineticPartials);
+    if (inStep) reduce(resources.kineticEarly, resources.kineticEarlyPartials);
     device.queue.submit([encoder.finish()]);
 
     // 🔴 THE PER-ATOM ENERGY ARRAYS ARE READ BACK WHOLE, WHICH IS A REPORTING
@@ -1082,6 +1114,9 @@ export class GpuSimulation {
       this.partialCount * 4, Float32Array);
     const kineticPartials = await readBuffer(device, allocator, resources.kineticPartials,
       this.kineticPartialCount * 4, Float32Array);
+    const kineticEarlyPartials = inStep
+      ? await readBuffer(device, allocator, resources.kineticEarlyPartials,
+        this.kineticPartialCount * 4, Float32Array) : null;
     const restraintSlots = this.restraints.atoms.length;
     const restraintEnergies = restraintSlots === 0 ? null
       : await readBuffer(device, allocator, resources.restraintEnergies,
@@ -1099,6 +1134,32 @@ export class GpuSimulation {
     for (const value of reciprocalPartials) reciprocal += value;
     let kinetic = 0;
     for (const value of kineticPartials) kinetic += value;
+    // 🔴 THE TEMPERATURE AND THE TOTAL ENERGY USE DIFFERENT SAMPLES, ON PURPOSE.
+    // `kinetic` is the post-step velocity, which pairs with the end-of-step
+    // positions and is what a conserved total needs - using the early sample
+    // there inflated the measured NVE fluctuation from 6.36 to 15.51 kJ/mol,
+    // a spurious half-step oscillation that reads as drift. The temperature
+    // uses the sample taken inside the step, before the closing half kick,
+    // which is where OpenMM reports: that moved the offset from a 298 K
+    // setpoint from -0.02 / -2.08 / -6.36 K at 1 / 2 / 4 fs to
+    // +0.46 / -0.33 / +0.88, against OpenMM's own +0.42 / +1.63 / +4.45.
+    let kineticForTemperature = kinetic;
+    let sampledAt = "after the step";
+    if (kineticEarlyPartials !== null) {
+      let early = 0;
+      for (const value of kineticEarlyPartials) early += value;
+      // 🔴 A GUARD, BECAUSE THE FLAG AND THE PASS ARE SET IN TWO PLACES. The
+      // host marks the step it asked for an in-step sample and the encoder
+      // emits the pass; if those ever disagree the buffer is read unwritten and
+      // the temperature comes out as 0 K, which is how the first falsification
+      // of this failed - it reported -298.00 K rather than falling back. A
+      // kinetic energy of zero beside a non-zero post-step one cannot be
+      // physical, so take the post-step value and say so instead.
+      if (early > 0 || kinetic <= 0) {
+        kineticForTemperature = early;
+        sampledAt = "before the closing half kick";
+      }
+    }
 
     const coulomb = coulombDirect + reciprocal + this.selfEnergy.total;
     const dispersion = this.#dispersion();
@@ -1155,7 +1216,14 @@ export class GpuSimulation {
       total: potential + kinetic,
       positionRestraint: restraintEnergy,
       restrainedAtoms: restraintSlots,
-      temperature: (2 * kinetic) / (this.system.degreesOfFreedom * BOLTZMANN),
+      temperature: (2 * kineticForTemperature)
+        / (this.system.degreesOfFreedom * BOLTZMANN),
+      kineticForTemperature,
+      // Which point in B A O A B the kinetic energy came from. OpenMM's
+      // LangevinMiddleIntegrator reports at "before the closing half kick",
+      // which is what a run reports; the other is what a one-off evaluation
+      // outside a step can offer.
+      kineticSampledAt: sampledAt,
       volume: this.#volume(),
       boxVectors: Float64Array.from(this.boxVectors),
     };

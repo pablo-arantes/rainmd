@@ -92,6 +92,7 @@ Re-run them with `npm run check:openmm`, `npm run check:gradients`,
 | **the page, in real Chrome** | headless Chrome 157 over CDP, `npm run test:page` | loads, probes `apple / metal-3`, runs the bonded kernel: energy 1.75e-8, force 7.2% of the f32 bound — **identical to the Dawn lane** |
 | **every kernel in both lanes** | the same thirteen check modules run through Dawn and through Chrome | 0 failures in both; the full force path agrees between implementations to 1e-8 on the total |
 | determinism | two independent runs of the nonbonded check | **bit-identical** energies, including the arm that reaches them via a grow-and-rebuild |
+| **the reported temperature holds the setpoint across the timestep range** | `npm run check:thermostat`, NVT friction 10/ps, 60 ps at each of 1 / 2 / 4 fs | offsets **+0.46 / −0.33 / +0.88 K**, growth over the range **0.42 K**; it was −0.02 / −2.08 / −6.36, and OpenMM's own is +0.42 / +1.63 / +4.45 |
 | **a blown-up run is refused rather than completed** | `npm run test:gpu:blowup`, 40 fs on the solvated fixture | stops at step 20 with `NonFiniteStateError` naming the timestep; a 2 fs run of the same length is **not** refused and reports a finite potential and 382 K; identical in Dawn and Chrome |
 | **coincident input atoms are refused before a step runs** | one water copied onto another, so SHAKE leaves them exactly superposed | refused at step 0 by the energy detector, separation after constraint projection **0.0 nm** — the arm asserts its own premise, because moving one oxygen instead of a whole molecule is silently undone by SHAKE |
 | **the NVE drift no longer grows as the timestep shrinks** | `npm run check:timestep` — NVE at 1 / 0.5 / 0.25 fs, neighbour list rebuilt every step | drift ratio over a fourfold smaller step **2.03** against a bar of 10; it was **824**, and the end temperature now holds 299.5 / 297.4 / 299.1 K where 0.25 fs reached **398 K** |
@@ -451,30 +452,47 @@ refuted on the way and are recorded in `docs/REVIEW.md` so they are not retried:
 the constraint schedule, the RATTLE count, and an attempt to settle it from ⟨U⟩,
 which at 60 ps per arm is too noisy by about 16×.
 
-🔴 **AND THE OBVIOUS FIX WAS TRIED, FAILED, AND WAS REVERTED.** The two
-velocities differ by `(halfStep/m)·F`, so the earlier estimator looks
-recoverable from what is already read back — and on `ala-vac` the reconstruction
-reproduces the true pre-kick temperature to 0.2–0.8 K. Implemented, it made the
-reported temperature **far worse**: +5.88 / +21.44 / **+86.85** K at 1 / 2 / 4 fs
-against OpenMM's +0.42 / +1.63 / +4.45. ⟨U⟩ was byte-identical, so only the
-estimator moved.
-
-The cause is RATTLE. The closing half kick is followed by a velocity projection,
-so `v_post = RATTLE(v_pre + (halfStep/m)·F)`, and subtracting the kick does not
-invert the projection — it adds back the bond-directed velocity RATTLE had
+🔴 **FIXED BY SAMPLING INSIDE THE STEP, AND THE FIRST ATTEMPT AT IT WAS WRONG.**
+The two velocities differ by `(halfStep/m)·F`, so the earlier estimator looks
+recoverable from what is already read back — and on `ala-vac` that
+reconstruction agrees to 0.2–0.8 K. It is wrong on a real system: the closing
+kick is followed by RATTLE, so `v_post = RATTLE(v_pre + (halfStep/m)·F)`, and
+subtracting the kick adds back the bond-directed velocity the projection
 removed. `ala-vac` carries 12 constraints, 18% of its 3N; `ala-wat` carries
-1176, **33%**. The reconstruction was validated on the fixture where it happens
-to work, which is the same mistake as checking a triclinic claim on a
-rectangular box.
+1176, **33%**. Implemented, the reconstruction reported **+86.85 K** at 4 fs
+against a true +4.45. It was validated on the fixture where it happens to work —
+the same mistake as checking a triclinic claim on a rectangular box.
 
-**The correct route** is to compute the estimator *inside* the step, before the
-closing kick, rather than reconstruct it afterwards: a kinetic pass encoded
-ahead of the final kick, emitted on the last step of a block since that is the
-one the host reports. That changes the step encoding rather than a reduction,
-and has not been done.
+What works is to take the sample *inside* the step: a kinetic pass encoded in
+`encodeLangevinStep` after the second drift-and-project and before the closing
+half kick, emitted only on the last step of a block since that is the one the
+host reports. Offsets from a 298 K setpoint:
 
-So the shipped number is still the post-kick estimator, with the O(dt²) offset
-above. Treat it as carrying that offset and do not tune a setpoint against it.
+| dt | before | now | OpenMM |
+|---|---|---|---|
+| 1 fs | −0.02 | **+0.46 ± 0.57** | +0.42 |
+| 2 fs | −2.08 | **−0.33 ± 0.54** | +1.63 |
+| 4 fs | −6.36 | **+0.88 ± 0.57** | +0.88 → +4.45 |
+
+Growth across the range is **0.42 K**, against 6.34 before and OpenMM's 4.03.
+The reported temperature is now flat to within its own sampling error at every
+timestep the page offers — better than the engine it was matched to.
+
+🔴 **AND THE TOTAL ENERGY STILL USES THE POST-STEP SAMPLE, WHICH IS NOT A
+DETAIL.** Pairing the early velocity with the end-of-step position is a
+half-step mismatch: doing so inflated the measured NVE energy fluctuation from
+9.31 to **15.51 kJ/mol**, a spurious oscillation that reads as drift. So
+`energy()` keeps both samples — `kinetic` for the conserved total,
+`kineticForTemperature` for the thermostat — and reports `kineticSampledAt` so
+the number's provenance is never guessed. Separating them restored the
+conservation figures exactly.
+
+🔴 **A ZERO TEMPERATURE WAS REACHABLE, AND IS NOW GUARDED.** The host marks the
+step it asked for an in-step sample and the encoder emits the pass; if those
+disagree the buffer is read unwritten and the temperature comes out as 0 K. The
+first falsification of this gate hit exactly that, reporting −298.00 K instead
+of falling back. A zero kinetic energy beside a non-zero post-step one cannot be
+physical, so `energy()` now takes the post-step value and says so.
 
 **Superseded:** Two hypotheses tested this pass, both refuted:
 

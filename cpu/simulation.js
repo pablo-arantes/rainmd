@@ -121,10 +121,25 @@ export function runDynamics(system, state, options) {
     options.stopSignal?.throwIfStopped?.();
     langevinStep(state, system, evaluation.forces, options);
     evaluation = potentialEnergy(system, state.positions, options);
+    // 🔴 THE KINETIC SAMPLE IS TAKEN HERE, BEFORE THE CLOSING HALF KICK, WHICH
+    // IS WHERE OPENMM TAKES IT. Its LangevinMiddleIntegrator ends a step at the
+    // position update and the velocity projection; this integrator then applies
+    // a closing half kick, and a sample read after it carries an O(dt^2) bias of
+    // the opposite sign. Measured on the device: the reported temperature's
+    // offset from a 298 K setpoint went from -0.02 / -2.08 / -6.36 K at
+    // 1 / 2 / 4 fs to +0.46 / -0.33 / +0.88, against OpenMM's own
+    // +0.42 / +1.63 / +4.45.
+    //
+    // 🔴 AND IT CANNOT BE RECONSTRUCTED AFTERWARDS. The two velocities differ by
+    // (halfStep/m)*F, but the closing kick is followed by RATTLE, so subtracting
+    // the kick adds back the bond-directed velocity the projection removed. That
+    // reconstruction agrees to 0.2-0.8 K on a 12-constraint vacuum fixture and
+    // is out by +87 K on the solvated one, where constraints are a third of 3N.
+    const sampled = instantaneousTemperature(system, state.velocities);
     langevinFinishStep(state, system, evaluation.forces, options);
 
     if ((step + 1) % reportInterval === 0 || step === steps - 1) {
-      const kinetic = instantaneousTemperature(system, state.velocities);
+      const kinetic = sampled;
       const report = {
         step: state.step,
         time: state.step * options.timestep,

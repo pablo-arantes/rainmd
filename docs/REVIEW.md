@@ -560,7 +560,28 @@ fetched at `web/app.js:197`). `ala-wat-big` is read by no code — but
 deleting it would make a published claim unreproducible. **Both need a tleap
 stanza, not a delete.**
 
-## 14. A *smaller* timestep makes the engine heat uncontrollably, and the temperature error is non-monotonic in dt — ✅ 14a FIXED; 14b DIAGNOSED, not yet fixed
+## 14. A *smaller* timestep makes the engine heat uncontrollably, and the temperature error is non-monotonic in dt — ✅ BOTH FIXED
+
+> **14b FIXED 2026-11-13.** The kinetic sample is taken inside the step, before
+> the closing half kick, which is where OpenMM reports. Offsets from a 298 K
+> setpoint went from −0.02 / −2.08 / −6.36 K at 1 / 2 / 4 fs to
+> **+0.46 / −0.33 / +0.88**, flat to within the sampling error and better than
+> OpenMM's own +0.42 / +1.63 / +4.45. Gated by `npm run check:thermostat`
+> against a 2 K bar derived from the 0.55 K standard error; falsified by
+> disabling the request, which reproduces the original offsets exactly.
+>
+> Three things that fell out of doing it:
+> - **The cheap version is wrong.** Reconstructing the earlier velocity as
+>   `v − (halfStep/m)·F` agrees to 0.2–0.8 K on a 12-constraint vacuum fixture
+>   and is out by **+87 K** on the solvated one, because the closing kick is
+>   followed by RATTLE and subtracting the kick does not invert the projection.
+>   It was validated on the fixture where it happens to work.
+> - **The total energy must keep the post-step sample.** Using the early one for
+>   the conserved quantity is a half-step mismatch that inflated the NVE energy
+>   fluctuation from 9.31 to 15.51 kJ/mol. `energy()` now carries both and
+>   reports `kineticSampledAt`.
+> - **A zero temperature was reachable** when the host's marker and the
+>   encoder's pass disagreed, and is now guarded.
 
 > **14b INVESTIGATED 2026-11-12 and CONFIRMED SEPARATE.** Re-measured on the
 > device after the 14a fix — NVT, friction 10/ps, 60 ps at each step from one

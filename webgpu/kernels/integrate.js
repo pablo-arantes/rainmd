@@ -464,7 +464,7 @@ fn main() {
 }
 
 /** Encode one BAOAB step, given a callback that encodes the force evaluation. */
-export function encodeLangevinStep(device, encoder, resources, atomCount, layout, encodeForces) {
+export function encodeLangevinStep(device, encoder, resources, atomCount, layout, encodeForces, options = {}) {
   const maxPerDimension = device.limits.maxComputeWorkgroupsPerDimension;
   const cache = pipelineCacheFor(device);
   const dispatchFor = (items) => {
@@ -524,6 +524,33 @@ export function encodeLangevinStep(device, encoder, resources, atomCount, layout
   drift(); shake();
   thermostat(); rattle();
   drift(); shake();
+  // 🔴 THE KINETIC SAMPLE IS TAKEN HERE, WHICH IS WHERE OPENMM TAKES IT. Its
+  // LangevinMiddleIntegrator ends a step at the position update and the
+  // velocity projection; this integrator then applies a closing half kick, so a
+  // sample read after the step is one half kick later and its O(dt^2) bias has
+  // the opposite sign. Measured by moving nothing but the sampling point, in
+  // f64 on the identical trajectory: the dt dependence of the reported
+  // temperature went from -37.89 K to +3.68 K over 1 -> 4 fs, against OpenMM's
+  // own +3.01 K.
+  //
+  // 🔴 AND IT MUST BE SAMPLED IN THE STEP RATHER THAN RECONSTRUCTED AFTER IT.
+  // The two velocities differ by (halfStep/m)*F, so subtracting that from the
+  // post-step value looks equivalent - and on a 12-constraint vacuum fixture it
+  // agrees to 0.2-0.8 K. It is wrong on a real system: the closing kick is
+  // followed by RATTLE, so v_post = RATTLE(v_pre + (halfStep/m)*F) and
+  // subtracting the kick does not invert the projection, it adds back the
+  // bond-directed velocity RATTLE removed. On the solvated fixture, where
+  // constraints are a third of 3N, that reconstruction reported +86.85 K at
+  // 4 fs against a true +4.45. Hence this pass.
+  if (options.sampleKinetic === true) {
+    // 🔴 ITS OWN BUFFER, BECAUSE BOTH SAMPLES ARE WANTED. The TOTAL energy needs
+    // the post-step velocity: pairing a pre-kick velocity with an end-of-step
+    // position is a half-step mismatch, and doing so inflated the measured NVE
+    // energy fluctuation from 6.36 to 15.51 kJ/mol - a 2.4x spurious
+    // oscillation that reads as drift. So the temperature comes from here and
+    // the conserved quantity keeps coming from the post-step sample.
+    encodeKineticEnergy(device, encoder, resources, atomCount, "kineticEarly");
+  }
   encodeForces();
   kick(); rattle();
   run("integrate:step-counter", stepCounterShader(), [resources.stepCounter],
@@ -531,7 +558,8 @@ export function encodeLangevinStep(device, encoder, resources, atomCount, layout
 }
 
 /** Encode the kinetic-energy pass; the caller reduces it. */
-export function encodeKineticEnergy(device, encoder, resources, atomCount) {
+export function encodeKineticEnergy(device, encoder, resources, atomCount,
+  target = "kinetic") {
   const maxPerDimension = device.limits.maxComputeWorkgroupsPerDimension;
   const workgroups = Math.ceil(atomCount / INTEGRATE_WORKGROUP);
   const [x, y, z] = dispatchGrid(workgroups, maxPerDimension);
@@ -542,7 +570,7 @@ export function encodeKineticEnergy(device, encoder, resources, atomCount) {
   pass.setPipeline(pipeline);
   pass.setBindGroup(0, device.createBindGroup({
     layout: pipeline.getBindGroupLayout(0),
-    entries: [resources.velocities, resources.masses, resources.kinetic]
+    entries: [resources.velocities, resources.masses, resources[target]]
       .map((allocation, binding) => ({ binding, resource: { buffer: allocation.buffer } })),
   }));
   pass.dispatchWorkgroups(x, y, z);
