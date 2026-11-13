@@ -1,0 +1,74 @@
+# The lanes a GitHub-hosted runner cannot do, on a machine that has a GPU.
+#
+# 🔴 THERE IS NO `pull_request` TRIGGER, AND THAT IS THE WHOLE SECURITY DESIGN.
+# This repository is public, and GitHub advises against self-hosted runners on
+# public repositories for one reason: a workflow is code, so anyone able to open
+# a pull request from a fork could otherwise run whatever they liked on the
+# machine the runner sits on. The repository's approval policy is
+# `first_time_contributors`, which means a returning contributor would not even
+# be prompted. Triggering only on push-to-main and manual dispatch removes the
+# path entirely - a fork's pull request never reaches this runner, whatever it
+# contains.
+#
+# Defence in depth, if you want it: Settings -> Actions -> General -> "Require
+# approval for all external contributors". That protects the hosted `ci`
+# workflow too, which does run on pull requests (safely, on GitHub's own
+# hardware).
+#
+# 🔴 AND IT IS LABELLED BY CAPABILITY, NOT BY OPERATING SYSTEM. `runs-on` asks
+# for `webgpu` rather than `macOS`, because what these lanes need is a real
+# WebGPU device - Dawn in Node and a headless Chrome with one. Labelling the
+# capability means moving the runner to a Linux box with a GPU needs no change
+# here.
+name: gpu
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 03:17 UTC nightly. An odd minute, because the top of the hour is when
+    # every scheduled workflow on GitHub queues at once.
+    - cron: '17 3 * * *'
+  push:
+    branches: [main]
+    # Documentation changes cannot move a kernel, and this runs on somebody's
+    # actual desk.
+    paths-ignore:
+      - '**/*.md'
+      - 'LICENSE'
+      - '.github/workflows/ci.yml'
+
+# One run at a time: there is a single machine behind this, and a queue of
+# superseded runs competing for one GPU is worse than no queue.
+concurrency:
+  group: gpu-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  kernels:
+    name: fourteen kernel checks, through Dawn
+    runs-on: [self-hosted, webgpu]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - run: npm run test:gpu
+
+  slow:
+    name: the long integrations
+    runs-on: [self-hosted, webgpu]
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      # The NPT unit cell, the thermostat against its setpoint across
+      # timesteps, the drift's timestep scaling, and the live metrics against
+      # MDAnalysis. About nine minutes, and the reason this runner exists:
+      # check:thermostat and check:timestep are the gates on the two subtlest
+      # defects in the engine and nothing else runs them.
+      - run: npm run test:slow
+
+  page:
+    name: nine browser lanes, in real Chrome
+    runs-on: [self-hosted, webgpu]
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - run: npm run test:page:all

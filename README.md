@@ -140,8 +140,22 @@ by MDAnalysis, the reported temperature against its setpoint at 1, 2 and 4 fs,
 the energy drift's timestep scaling, and the live metrics against MDAnalysis.
 `npm run test:page:all` drives the nine browser lanes.
 
-🔴 **A GREEN TICK ON CI COVERS LESS THAN HALF THE SUITE, AND THE WORKFLOW SAYS
-SO.** GitHub's hosted runners have no GPU, so every kernel, every page lane and
+The GPU lanes can run in CI too, on a machine that has a GPU:
+`tools/setup-gpu-runner.sh` registers one as a self-hosted runner and
+`.github/workflows/gpu.yml` drives the three lanes on it, nightly and on demand.
+
+🔴 **AND THAT WORKFLOW HAS NO `pull_request` TRIGGER, WHICH IS THE WHOLE
+SECURITY DESIGN.** This repository is public, and a workflow is code: were a
+fork's pull request able to reach a self-hosted runner, anyone who can open one
+could run whatever they liked on the machine it sits on. GitHub's own guidance
+is to pair self-hosted runners with private repositories only. Triggering on
+push-to-main, a nightly schedule and manual dispatch removes the path entirely,
+and the installer **refuses to run** if that ever stops being true. Worth
+turning on either way: Settings → Actions → General → "Require approval for all
+external contributors".
+
+🔴 **A GREEN TICK ON THE HOSTED LANE COVERS LESS THAN HALF THE SUITE, AND THE
+WORKFLOW SAYS SO.** GitHub's hosted runners have no GPU, so every kernel, every page lane and
 every long integration is outside it. What CI does catch is the class of defect
 that has broken this repository most often — a backtick inside a WGSL template
 literal, which stops a file parsing and has happened seven times: `npm test`
