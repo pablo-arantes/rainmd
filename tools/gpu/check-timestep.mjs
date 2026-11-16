@@ -23,7 +23,22 @@ const slope = (t, y) => {
   return num / den;
 };
 
-export async function main(device) {
+export async function main(device, args = []) {
+  // 🔴 THE WARM-UP SEED IS THE WHOLE REALISATION, AND IT IS A FLAG SO THAT THE
+  // SPREAD CAN BE MEASURED. The NVE arms run at friction 0, so their own seed
+  // never enters the trajectory - the noise that decides which realisation this
+  // is comes entirely from the warm-up's Langevin integrator and from the
+  // initial velocity assignment, both of which take this number. Default 5, so
+  // the figures recorded in docs/STATUS.md reproduce exactly.
+  //
+  // It exists because an `erfc` refit moved the reported ratio 2.03 -> 3.18 at
+  // the default seed, and a single realisation cannot say whether that is the
+  // coefficients or the draw. `--seed=N` makes the question answerable.
+  const seedFlag = args.find((argument) => argument.startsWith("--seed="));
+  const warmSeed = seedFlag === undefined ? 5 : Number(seedFlag.slice("--seed=".length));
+  if (!Number.isInteger(warmSeed) || warmSeed < 0) {
+    throw new RangeError(`--seed must be a non-negative integer, got ${seedFlag}`);
+  }
   const topology = parsePrmtop(await readFixture("ala-wat.prmtop", import.meta.url));
   const coordinates = parseInpcrd(await readFixture("ala-wat.inpcrd", import.meta.url),
     { expectedAtomCount: topology.atomCount });
@@ -40,11 +55,11 @@ export async function main(device) {
     // this probe warmed both modes at 2 fs and blew up in its own setup.
     const warmDt = constraints === "HBonds" ? 0.002 : 0.00025;
     const warm = new GpuSimulation(device, system, {
-      timestep: warmDt, temperature: 298, friction: 1.0, seed: 5,
+      timestep: warmDt, temperature: 298, friction: 1.0, seed: warmSeed,
       rebuildInterval: 10,
     });
     const v0 = new Float64Array(topology.atomCount * 3);
-    setVelocitiesToTemperature(system, v0, 298, 5);
+    setVelocitiesToTemperature(system, v0, 298, warmSeed);
     const st = createState(system, coordinates.positions, { velocities: v0, tolerance: 1e-5 });
     warm.setState(st.positions, st.velocities);
     await warm.initialise();
@@ -125,6 +140,7 @@ export async function main(device) {
   const hot = constrained.filter((a) => a.temperatureEnd !== undefined
     && Math.abs(a.temperatureEnd - 298) > 40);
   if (growth === null || growth > 10 || hot.length > 0) failures += 1;
+  results.warmSeed = warmSeed;
   results.scalingWithTimestep = {
     ok: growth !== null && growth <= 10 && hot.length === 0,
     driftRatioOverFourfoldSmallerStep: growth === null ? null : Number(growth.toFixed(2)),
